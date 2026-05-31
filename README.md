@@ -55,6 +55,12 @@ Si el proyecto sigue intentando resolver dependencias antiguas del modulo `print
 npm install --legacy-peer-deps
 ```
 
+Despues de instalar, el proyecto aplica automaticamente un parche local sobre `printer` para corregir un error de compilacion en Windows/MSVC. Si necesitas ejecutarlo manualmente:
+
+```bash
+npm run patch:printer
+```
+
 3. Genera el ejecutable:
 
 ```bash

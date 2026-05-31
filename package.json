@@ -10,6 +10,9 @@
     "npm": ">=10"
   },
   "scripts": {
+    "postinstall": "node scripts/patch-printer.js",
+    "prebuild": "node scripts/patch-printer.js",
+    "patch:printer": "node scripts/patch-printer.js",
     "dev": "npm run build && electron .",
     "build": "tsc -p tsconfig.json",
     "dist:win": "npm run build && electron-builder --win nsis",
