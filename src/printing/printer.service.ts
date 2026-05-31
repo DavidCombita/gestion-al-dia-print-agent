@@ -14,7 +14,14 @@ interface PrintDirectOptions {
 }
 
 type PrinterModule = {
-  getPrinters: () => Array<{ name: string; isDefault?: boolean; status?: string }>;
+  getPrinters: () => Array<{
+    name?: string;
+    printerName?: string;
+    isDefault?: boolean;
+    status?: string | string[];
+    statusNumber?: number;
+  }>;
+  getDefaultPrinterName?: () => string;
   printDirect: (options: PrintDirectOptions) => void;
 };
 
@@ -26,9 +33,13 @@ export class PrinterService {
 
   async listPrinters(): Promise<PrinterDescriptor[]> {
     const printerModule = await this.loadPrinterModule();
+    const defaultPrinterName = this.resolveDefaultPrinterName(printerModule);
+
     return printerModule.getPrinters().map((printer) => ({
-      name: printer.name,
-      isDefault: printer.isDefault === true,
+      name: resolvePrinterDisplayName(printer),
+      isDefault:
+        printer.isDefault === true ||
+        resolvePrinterDisplayName(printer) === defaultPrinterName,
       status: normalizePrinterStatus(printer.status),
     }));
   }
@@ -58,6 +69,19 @@ export class PrinterService {
         },
       });
     });
+  }
+
+  private resolveDefaultPrinterName(printerModule: PrinterModule): string | null {
+    if (typeof printerModule.getDefaultPrinterName !== 'function') {
+      return null;
+    }
+
+    try {
+      const defaultPrinterName = printerModule.getDefaultPrinterName()?.trim();
+      return defaultPrinterName || null;
+    } catch {
+      return null;
+    }
   }
 
   resolvePrinterName(kind: 'invoice' | 'kitchen'): string {
@@ -158,18 +182,42 @@ export class PrinterService {
   }
 }
 
-function normalizePrinterStatus(value: string | undefined): PrinterDescriptor['status'] {
-  const normalizedValue = value?.trim().toLowerCase();
+function normalizePrinterStatus(value: string | string[] | undefined): PrinterDescriptor['status'] {
+  const normalizedValues = (Array.isArray(value) ? value : [value])
+    .filter((entry): entry is string => typeof entry === 'string')
+    .map((entry) => entry.trim().toLowerCase())
+    .filter((entry) => entry.length > 0);
 
-  if (normalizedValue === 'online' || normalizedValue === 'idle') {
-    return 'ready';
+  if (!normalizedValues.length) {
+    return 'unknown';
   }
 
-  if (normalizedValue === 'offline') {
+  if (normalizedValues.includes('offline')) {
     return 'offline';
   }
 
+  if (
+    normalizedValues.includes('online') ||
+    normalizedValues.includes('idle') ||
+    normalizedValues.includes('waiting') ||
+    normalizedValues.includes('printing') ||
+    normalizedValues.includes('processing')
+  ) {
+    return 'ready';
+  }
+
   return 'unknown';
+}
+
+function resolvePrinterDisplayName(printer: {
+  name?: string;
+  printerName?: string;
+}): string {
+  const candidateName =
+    (typeof printer.name === 'string' && printer.name.trim()) ||
+    (typeof printer.printerName === 'string' && printer.printerName.trim());
+
+  return candidateName || 'Impresora sin nombre';
 }
 
 function modulePathExists(modulePath: string): boolean {
