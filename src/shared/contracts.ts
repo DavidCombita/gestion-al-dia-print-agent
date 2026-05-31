@@ -7,6 +7,8 @@ export interface AgentHealthResponse {
   platform: NodeJS.Platform;
   pairingRequired: boolean;
   configured: boolean;
+  printerModuleReady: boolean;
+  printerModuleError?: string;
 }
 
 export interface PrinterDescriptor {

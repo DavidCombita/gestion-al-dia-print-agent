@@ -78,8 +78,9 @@ export class LocalServer {
     this.app.use(express.json({ limit: '1mb' }));
     this.app.use(cors(createCorsOptions(this.dependencies.configService)));
 
-    this.app.get('/health', (_request, response) => {
+    this.app.get('/health', async (_request, response) => {
       const config = this.dependencies.configService.getConfig();
+      const printerModuleStatus = await this.dependencies.printerService.getModuleStatus();
       const payload: AgentHealthResponse = {
         status: 'ok',
         app: 'Gestion Al Dia Print Agent',
@@ -87,6 +88,8 @@ export class LocalServer {
         platform: process.platform,
         pairingRequired: config.pairingToken !== null,
         configured: Boolean(config.invoicePrinterName || config.kitchenPrinterName),
+        printerModuleReady: printerModuleStatus.ready,
+        printerModuleError: printerModuleStatus.error,
       };
 
       response.json(payload);

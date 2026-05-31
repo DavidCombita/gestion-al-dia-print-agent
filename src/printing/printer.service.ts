@@ -74,6 +74,23 @@ export class PrinterService {
     return printerName;
   }
 
+  async getModuleStatus(): Promise<{ ready: boolean; error?: string }> {
+    try {
+      await this.loadPrinterModule();
+      return {
+        ready: true,
+      };
+    } catch (error) {
+      return {
+        ready: false,
+        error:
+          error instanceof Error && error.message.trim()
+            ? error.message
+            : 'No fue posible cargar el modulo nativo de impresion.',
+      };
+    }
+  }
+
   private async loadPrinterModule(): Promise<PrinterModule> {
     if (process.platform !== 'win32') {
       throw new Error('Gestion al Dia Print Agent solo soporta impresion directa en Windows.');

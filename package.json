@@ -44,6 +44,9 @@
       "package.json"
     ],
     "asar": true,
+    "asarUnpack": [
+      "node_modules/printer/**/*"
+    ],
     "win": {
       "target": [
         "nsis"
