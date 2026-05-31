@@ -87,7 +87,9 @@ export class PrinterService {
   resolvePrinterName(kind: 'invoice' | 'kitchen'): string {
     const config = this.configService.getConfig();
     const printerName =
-      kind === 'invoice' ? config.invoicePrinterName : config.kitchenPrinterName;
+      kind === 'invoice'
+        ? config.invoicePrinterName
+        : config.kitchenPrinterName ?? config.invoicePrinterName;
 
     if (!printerName) {
       throw new Error(

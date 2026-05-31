@@ -1,6 +1,7 @@
 import http from 'node:http';
 import cors from 'cors';
 import express, { NextFunction, Request, Response } from 'express';
+import { shell } from 'electron';
 import { AppConfigService } from '../config/app-config.service';
 import { LoggerService } from '../logs/logger.service';
 import { PrintQueueService } from '../printing/print-queue.service';
@@ -132,6 +133,15 @@ export class LocalServer {
           message: 'Configuracion local actualizada.',
           config: this.dependencies.configService.saveConfig(nextConfig),
         });
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    this.app.post('/config/reveal', async (_request, response, next) => {
+      try {
+        await shell.showItemInFolder(this.dependencies.configService.getConfigPath());
+        this.sendSuccess(response, 'Se abrio la carpeta de configuracion del agente.');
       } catch (error) {
         next(error);
       }
