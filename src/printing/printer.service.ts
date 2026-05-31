@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { AppConfigService } from '../config/app-config.service';
 import { LoggerService } from '../logs/logger.service';
 import { PrinterDescriptor } from '../shared/contracts';
@@ -96,15 +98,63 @@ export class PrinterService {
       throw new Error('Gestion al Dia Print Agent solo soporta impresion directa en Windows.');
     }
 
-    try {
-      const printerModule = (await import('printer')) as unknown as PrinterModule;
-      return printerModule;
-    } catch (error) {
-      this.logger.error('No fue posible cargar el modulo nativo de impresion.', error);
-      throw new Error(
-        'No fue posible cargar el modulo de impresion nativo. Ejecuta npm install en Windows y recompila el agente.',
-      );
+    const attemptedPaths: string[] = [];
+    const candidateModulePaths = [
+      'printer',
+      path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'printer'),
+      path.join(
+        process.resourcesPath,
+        'app.asar.unpacked',
+        'node_modules',
+        'printer',
+        'lib',
+        'printer',
+      ),
+      path.join(__dirname, '..', '..', 'node_modules', 'printer'),
+      path.join(__dirname, '..', '..', 'node_modules', 'printer', 'lib', 'printer'),
+    ];
+
+    let lastError: unknown = null;
+
+    for (const candidatePath of candidateModulePaths) {
+      attemptedPaths.push(candidatePath);
+
+      try {
+        if (candidatePath !== 'printer' && !modulePathExists(candidatePath)) {
+          continue;
+        }
+
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const loadedModule = require(candidatePath) as PrinterModule;
+
+        if (
+          loadedModule &&
+          typeof loadedModule.getPrinters === 'function' &&
+          typeof loadedModule.printDirect === 'function'
+        ) {
+          this.logger.info('Modulo nativo de impresion cargado correctamente.', {
+            candidatePath,
+          });
+          return loadedModule;
+        }
+      } catch (error) {
+        lastError = error;
+      }
     }
+
+    this.logger.error('No fue posible cargar el modulo nativo de impresion.', {
+      attemptedPaths,
+      lastError,
+    });
+
+    const errorDetails =
+      lastError instanceof Error && lastError.message.trim()
+        ? ` Detalle: ${lastError.message.trim()}`
+        : '';
+
+    throw new Error(
+      `No fue posible cargar el modulo de impresion nativo.${errorDetails} Intentos: ${attemptedPaths.join(' | ')}`,
+    );
   }
 }
 
@@ -120,4 +170,20 @@ function normalizePrinterStatus(value: string | undefined): PrinterDescriptor['s
   }
 
   return 'unknown';
+}
+
+function modulePathExists(modulePath: string): boolean {
+  if (fs.existsSync(modulePath)) {
+    return true;
+  }
+
+  if (fs.existsSync(`${modulePath}.js`)) {
+    return true;
+  }
+
+  if (fs.existsSync(`${modulePath}.node`)) {
+    return true;
+  }
+
+  return false;
 }
