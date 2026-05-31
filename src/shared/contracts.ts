@@ -9,6 +9,12 @@ export interface AgentHealthResponse {
   configured: boolean;
   printerModuleReady: boolean;
   printerModuleError?: string;
+  uptimeSeconds?: number;
+  queue?: {
+    pendingJobs: number;
+    isProcessing: boolean;
+    activeJobLabel?: string;
+  };
 }
 
 export interface PrinterDescriptor {

@@ -4,6 +4,8 @@ import { AppConfigService } from '../config/app-config.service';
 import { LoggerService } from '../logs/logger.service';
 import { PrinterDescriptor } from '../shared/contracts';
 
+const PRINT_DIRECT_TIMEOUT_MS = 15_000;
+
 interface PrintDirectOptions {
   data: Buffer;
   type: 'RAW';
@@ -26,6 +28,8 @@ type PrinterModule = {
 };
 
 export class PrinterService {
+  private printerModule: PrinterModule | null = null;
+
   constructor(
     private readonly configService: AppConfigService,
     private readonly logger: LoggerService,
@@ -52,22 +56,58 @@ export class PrinterService {
     const printerModule = await this.loadPrinterModule();
 
     await new Promise<void>((resolve, reject) => {
-      printerModule.printDirect({
-        data: payload,
-        type: 'RAW',
-        printer: targetPrinterName,
-        docname: documentName,
-        success: () => {
-          this.logger.info('Trabajo enviado a la impresora.', {
-            targetPrinterName,
-            documentName,
-          });
-          resolve();
-        },
-        error: (error) => {
-          reject(new Error(typeof error === 'string' ? error : 'La impresion RAW fallo.'));
-        },
-      });
+      let isSettled = false;
+      const timeoutId = setTimeout(() => {
+        if (isSettled) {
+          return;
+        }
+
+        isSettled = true;
+        reject(
+          new Error(
+            `La impresora no respondio a tiempo para el trabajo "${documentName}".`,
+          ),
+        );
+      }, PRINT_DIRECT_TIMEOUT_MS);
+
+      try {
+        printerModule.printDirect({
+          data: payload,
+          type: 'RAW',
+          printer: targetPrinterName,
+          docname: documentName,
+          success: () => {
+            if (isSettled) {
+              return;
+            }
+
+            isSettled = true;
+            clearTimeout(timeoutId);
+            this.logger.info('Trabajo enviado a la impresora.', {
+              targetPrinterName,
+              documentName,
+            });
+            resolve();
+          },
+          error: (error) => {
+            if (isSettled) {
+              return;
+            }
+
+            isSettled = true;
+            clearTimeout(timeoutId);
+            reject(createPrintError(error, targetPrinterName, documentName));
+          },
+        });
+      } catch (error) {
+        if (isSettled) {
+          return;
+        }
+
+        isSettled = true;
+        clearTimeout(timeoutId);
+        reject(createPrintError(error, targetPrinterName, documentName));
+      }
     });
   }
 
@@ -124,6 +164,10 @@ export class PrinterService {
       throw new Error('Gestion al Dia Print Agent solo soporta impresion directa en Windows.');
     }
 
+    if (this.printerModule) {
+      return this.printerModule;
+    }
+
     const attemptedPaths: string[] = [];
     const candidateModulePaths = [
       'printer',
@@ -158,10 +202,11 @@ export class PrinterService {
           typeof loadedModule.getPrinters === 'function' &&
           typeof loadedModule.printDirect === 'function'
         ) {
+          this.printerModule = loadedModule;
           this.logger.info('Modulo nativo de impresion cargado correctamente.', {
             candidatePath,
           });
-          return loadedModule;
+          return this.printerModule;
         }
       } catch (error) {
         lastError = error;
@@ -236,4 +281,22 @@ function modulePathExists(modulePath: string): boolean {
   }
 
   return false;
+}
+
+function createPrintError(
+  error: unknown,
+  targetPrinterName: string,
+  documentName: string,
+): Error {
+  if (typeof error === 'string' && error.trim()) {
+    return new Error(error.trim());
+  }
+
+  if (error instanceof Error && error.message.trim()) {
+    return new Error(error.message.trim());
+  }
+
+  return new Error(
+    `La impresion RAW fallo para "${documentName}" en la impresora "${targetPrinterName}".`,
+  );
 }

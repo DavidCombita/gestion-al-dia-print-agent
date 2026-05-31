@@ -20,37 +20,68 @@ import { formatTestTicket } from '../printing/formatters/test-ticket.formatter';
 
 const HOST = '127.0.0.1';
 const PORT = 3088;
+const SERVER_KEEP_ALIVE_TIMEOUT_MS = 30_000;
+const SERVER_HEADERS_TIMEOUT_MS = 35_000;
+const SERVER_REQUEST_TIMEOUT_MS = 30_000;
+const REQUEST_HANDLER_TIMEOUT_MS = 20_000;
+const SERVER_STOP_TIMEOUT_MS = 5_000;
 
 export interface LocalServerDependencies {
   version: string;
+  startedAt: number;
   configService: AppConfigService;
   logger: LoggerService;
   queueService: PrintQueueService;
   printerService: PrinterService;
   pairingTokenService: PairingTokenService;
+  onServerUnavailable?: (reason: 'server-error' | 'server-close', error?: unknown) => void;
 }
 
 export class LocalServer {
   private readonly app = express();
   private server: http.Server | null = null;
+  private isStopping = false;
 
   constructor(private readonly dependencies: LocalServerDependencies) {
     this.configure();
   }
 
+  isRunning(): boolean {
+    return this.server?.listening === true;
+  }
+
   async start(): Promise<void> {
-    if (this.server) {
+    if (this.isRunning()) {
       return;
     }
 
-    await new Promise<void>((resolve) => {
-      this.server = this.app.listen(PORT, HOST, () => {
+    this.isStopping = false;
+
+    await new Promise<void>((resolve, reject) => {
+      const nextServer = this.app.listen(PORT, HOST);
+      const cleanup = () => {
+        nextServer.off('listening', handleListening);
+        nextServer.off('error', handleError);
+      };
+      const handleListening = () => {
+        cleanup();
+        this.server = nextServer;
+        this.attachLifecycleHandlers(nextServer);
         this.dependencies.logger.info('Servidor local iniciado.', {
           host: HOST,
           port: PORT,
         });
         resolve();
-      });
+      };
+      const handleError = (error: Error) => {
+        cleanup();
+        this.server = null;
+        this.dependencies.logger.error('No fue posible iniciar el servidor local.', error);
+        reject(error);
+      };
+
+      nextServer.once('listening', handleListening);
+      nextServer.once('error', handleError);
     });
   }
 
@@ -61,23 +92,64 @@ export class LocalServer {
 
     const currentServer = this.server;
     this.server = null;
+    this.isStopping = true;
 
-    await new Promise<void>((resolve, reject) => {
-      currentServer.close((error) => {
-        if (error) {
-          reject(error);
-          return;
-        }
+    try {
+      await new Promise<void>((resolve, reject) => {
+        let isSettled = false;
+        const finish = (callback: () => void) => {
+          if (isSettled) {
+            return;
+          }
 
-        resolve();
+          isSettled = true;
+          clearTimeout(timeoutId);
+          callback();
+        };
+        const timeoutId = setTimeout(() => {
+          this.dependencies.logger.warn(
+            'El servidor local tardo demasiado en cerrar. Se forzaran las conexiones activas.',
+          );
+          currentServer.closeAllConnections?.();
+          finish(resolve);
+        }, SERVER_STOP_TIMEOUT_MS);
+
+        currentServer.close((error) => {
+          if (error) {
+            finish(() => reject(error));
+            return;
+          }
+
+          finish(resolve);
+        });
       });
-    });
+    } finally {
+      this.isStopping = false;
+    }
   }
 
   private configure(): void {
     this.app.disable('x-powered-by');
     this.app.use(express.json({ limit: '1mb' }));
     this.app.use(cors(createCorsOptions(this.dependencies.configService)));
+    this.app.use((request, response, next) => {
+      response.setTimeout(REQUEST_HANDLER_TIMEOUT_MS, () => {
+        if (response.headersSent) {
+          return;
+        }
+
+        this.dependencies.logger.warn('La peticion local excedio el tiempo maximo.', {
+          method: request.method,
+          path: request.originalUrl,
+        });
+        response.status(504).json({
+          success: false,
+          message:
+            'El agente local tardo demasiado en procesar la solicitud. Vuelve a intentar.',
+        });
+      });
+      next();
+    });
 
     this.app.get('/health', async (_request, response) => {
       const config = this.dependencies.configService.getConfig();
@@ -91,6 +163,11 @@ export class LocalServer {
         configured: Boolean(config.invoicePrinterName || config.kitchenPrinterName),
         printerModuleReady: printerModuleStatus.ready,
         printerModuleError: printerModuleStatus.error,
+        uptimeSeconds: Math.max(
+          0,
+          Math.floor((Date.now() - this.dependencies.startedAt) / 1000),
+        ),
+        queue: this.dependencies.queueService.getSnapshot(),
       };
 
       response.json(payload);
@@ -290,6 +367,37 @@ export class LocalServer {
     response.json({
       success: true,
       message,
+    });
+  }
+
+  private attachLifecycleHandlers(server: http.Server): void {
+    server.keepAliveTimeout = SERVER_KEEP_ALIVE_TIMEOUT_MS;
+    server.headersTimeout = SERVER_HEADERS_TIMEOUT_MS;
+    server.requestTimeout = SERVER_REQUEST_TIMEOUT_MS;
+
+    server.on('error', (error: Error) => {
+      this.dependencies.logger.error('Error del servidor local.', error);
+
+      if (this.server === server && !this.isStopping) {
+        this.dependencies.onServerUnavailable?.('server-error', error);
+      }
+    });
+
+    server.on('close', () => {
+      const wasActiveServer = this.server === server;
+      const wasUnexpectedClose = wasActiveServer && !this.isStopping;
+
+      if (wasActiveServer) {
+        this.server = null;
+      }
+
+      this.dependencies.logger.warn('El servidor local se cerro.', {
+        unexpected: wasUnexpectedClose,
+      });
+
+      if (wasUnexpectedClose) {
+        this.dependencies.onServerUnavailable?.('server-close');
+      }
     });
   }
 }

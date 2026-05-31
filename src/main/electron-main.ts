@@ -12,13 +12,36 @@ import { PairingTokenService } from '../security/pairing-token.service';
 let tray: Tray | null = null;
 let localServer: LocalServer | null = null;
 let isQuitting = false;
+let loggerInstance: LoggerService | null = null;
+let restartTimer: ReturnType<typeof setTimeout> | null = null;
+let watchdogTimer: ReturnType<typeof setInterval> | null = null;
+let runtimeStartedAt = Date.now();
+
+const SINGLE_INSTANCE_LOCK = app.requestSingleInstanceLock();
+const SERVER_WATCHDOG_INTERVAL_MS = 15_000;
+
+if (!SINGLE_INSTANCE_LOCK) {
+  app.quit();
+}
 
 async function bootstrap(): Promise<void> {
+  if (!SINGLE_INSTANCE_LOCK) {
+    return;
+  }
+
   await app.whenReady();
+
+  if (localServer && tray) {
+    startWatchdog();
+    await ensureLocalServerStarted();
+    return;
+  }
+
   enableAutoStart();
 
   const userDataPath = app.getPath('userData');
-  const logger = new LoggerService(userDataPath);
+  const logger = loggerInstance ?? new LoggerService(userDataPath);
+  loggerInstance = logger;
   const configDirectory = path.join(userDataPath, 'config');
   const configService = new AppConfigService(configDirectory, logger);
   const printerService = new PrinterService(configService, logger);
@@ -27,26 +50,36 @@ async function bootstrap(): Promise<void> {
 
   localServer = new LocalServer({
     version: app.getVersion(),
+    startedAt: runtimeStartedAt,
     configService,
     logger,
     queueService,
     printerService,
     pairingTokenService,
+    onServerUnavailable: (reason, error) => {
+      logger.warn('El servidor local reporto una falla y se intentara recuperar.', {
+        reason,
+        error,
+      });
+      scheduleRestart(reason);
+    },
   });
 
-  await localServer.start();
+  await ensureLocalServerStarted();
+  startWatchdog();
 
   tray = createTray({
     localServer,
     configService,
     onQuit: async () => {
       isQuitting = true;
+      stopWatchdog();
+      clearScheduledRestart();
       await localServer?.stop();
       app.quit();
     },
     onRestart: async () => {
-      await localServer?.stop();
-      await localServer?.start();
+      await restartLocalServer('manual');
     },
   });
 
@@ -56,11 +89,18 @@ async function bootstrap(): Promise<void> {
 
   app.on('before-quit', () => {
     isQuitting = true;
+    stopWatchdog();
+    clearScheduledRestart();
   });
 
   app.on('activate', () => {
     if (!tray || !localServer) {
       void bootstrap();
+      return;
+    }
+
+    if (!localServer.isRunning()) {
+      void restartLocalServer('activate');
     }
   });
 }
@@ -82,4 +122,98 @@ app.on('will-quit', async (event) => {
   app.quit();
 });
 
+process.on('uncaughtException', (error) => {
+  loggerInstance?.error('Excepcion no controlada en el agente.', error);
+  void restartLocalServer('uncaught-exception');
+});
+
+process.on('unhandledRejection', (reason) => {
+  loggerInstance?.error('Promesa rechazada sin manejo en el agente.', reason);
+  scheduleRestart('unhandled-rejection');
+});
+
 void bootstrap();
+
+async function ensureLocalServerStarted(): Promise<void> {
+  if (!localServer) {
+    return;
+  }
+
+  try {
+    await localServer.start();
+  } catch (error) {
+    loggerInstance?.error('No fue posible iniciar el servidor local.', error);
+    scheduleRestart('startup-failure');
+    throw error;
+  }
+}
+
+async function restartLocalServer(reason: string): Promise<void> {
+  if (!localServer || isQuitting) {
+    return;
+  }
+
+  clearScheduledRestart();
+  loggerInstance?.warn('Reiniciando servidor local.', { reason });
+
+  try {
+    await localServer.stop();
+  } catch (error) {
+    loggerInstance?.warn('El servidor local fallo al detenerse durante el reinicio.', error);
+  }
+
+  try {
+    await localServer.start();
+    loggerInstance?.info('Servidor local reiniciado correctamente.', { reason });
+  } catch (error) {
+    loggerInstance?.error('Fallo el reinicio del servidor local.', error);
+    scheduleRestart('restart-failure');
+  }
+}
+
+function scheduleRestart(reason: string): void {
+  if (restartTimer || isQuitting) {
+    return;
+  }
+
+  loggerInstance?.warn('Programando reinicio automatico del servidor local.', { reason });
+  restartTimer = setTimeout(() => {
+    restartTimer = null;
+    void restartLocalServer(reason);
+  }, 5_000);
+}
+
+function clearScheduledRestart(): void {
+  if (!restartTimer) {
+    return;
+  }
+
+  clearTimeout(restartTimer);
+  restartTimer = null;
+}
+
+function startWatchdog(): void {
+  if (watchdogTimer || isQuitting) {
+    return;
+  }
+
+  watchdogTimer = setInterval(() => {
+    if (!localServer || isQuitting) {
+      return;
+    }
+
+    if (!localServer.isRunning()) {
+      loggerInstance?.warn('Watchdog detecto que el servidor local dejo de escuchar.');
+      scheduleRestart('watchdog-server-not-running');
+    }
+  }, SERVER_WATCHDOG_INTERVAL_MS);
+}
+
+function stopWatchdog(): void {
+  if (!watchdogTimer) {
+    return;
+  }
+
+  clearInterval(watchdogTimer);
+  watchdogTimer = null;
+}
