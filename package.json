@@ -34,6 +34,28 @@
   },
   "build": {
     "appId": "co.aldia.printagent",
-    "productName": "Gestion al Dia Print Agent"
+    "productName": "Gestion al Dia Print Agent",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "artifactName": "Gestion-al-Dia-Print-Agent-${version}-Setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false,
+      "createDesktopShortcut": false,
+      "createStartMenuShortcut": true
+    }
   }
 }
