@@ -1,0 +1,86 @@
+export type PaperWidth = '58mm' | '80mm';
+
+export interface AppConfig {
+  invoicePrinterName: string | null;
+  kitchenPrinterName: string | null;
+  invoiceCopies: number;
+  kitchenCopies: number;
+  invoiceEnabled: boolean;
+  kitchenEnabled: boolean;
+  paperWidth: PaperWidth;
+  pairingToken: string | null;
+  allowedOrigins: string[];
+}
+
+export const DEFAULT_ALLOWED_ORIGINS = [
+  'http://localhost:4200',
+  'https://aldia-co.com',
+];
+
+export const defaultAppConfig: AppConfig = {
+  invoicePrinterName: null,
+  kitchenPrinterName: null,
+  invoiceCopies: 1,
+  kitchenCopies: 1,
+  invoiceEnabled: true,
+  kitchenEnabled: true,
+  paperWidth: '80mm',
+  pairingToken: null,
+  allowedOrigins: DEFAULT_ALLOWED_ORIGINS,
+};
+
+export function sanitizeAppConfig(value: unknown): AppConfig {
+  const record = isRecord(value) ? value : {};
+
+  return {
+    invoicePrinterName: normalizeNullableString(record.invoicePrinterName),
+    kitchenPrinterName: normalizeNullableString(record.kitchenPrinterName),
+    invoiceCopies: normalizeCopies(record.invoiceCopies),
+    kitchenCopies: normalizeCopies(record.kitchenCopies),
+    invoiceEnabled: normalizeBoolean(record.invoiceEnabled, true),
+    kitchenEnabled: normalizeBoolean(record.kitchenEnabled, true),
+    paperWidth: normalizePaperWidth(record.paperWidth),
+    pairingToken: normalizeNullableString(record.pairingToken),
+    allowedOrigins: normalizeAllowedOrigins(record.allowedOrigins),
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function normalizeNullableString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
+}
+
+function normalizeCopies(value: unknown): number {
+  const parsedValue =
+    typeof value === 'number'
+      ? value
+      : typeof value === 'string'
+        ? Number(value)
+        : Number.NaN;
+  const safeValue = Number.isFinite(parsedValue) ? Math.trunc(parsedValue) : 1;
+  return Math.min(5, Math.max(1, safeValue));
+}
+
+function normalizeBoolean(value: unknown, fallback: boolean): boolean {
+  return typeof value === 'boolean' ? value : fallback;
+}
+
+function normalizePaperWidth(value: unknown): PaperWidth {
+  return value === '58mm' ? '58mm' : '80mm';
+}
+
+function normalizeAllowedOrigins(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return DEFAULT_ALLOWED_ORIGINS;
+  }
+
+  const origins = value
+    .filter((origin): origin is string => typeof origin === 'string')
+    .map((origin) => origin.trim())
+    .filter((origin) => origin.length > 0);
+
+  return origins.length ? origins : DEFAULT_ALLOWED_ORIGINS;
+}
