@@ -85,14 +85,51 @@ npm run dist:win
 
 La base actual del agente ya es compatible con el objetivo correcto para Windows (`nsis`), que es el recomendado para actualizar con `electron-updater`.
 
-Para dejarlo funcionando de extremo a extremo falta:
+### Lo que ya quedo integrado
 
-1. agregar `electron-updater` como dependencia de la app
-2. configurar `publish` en `electron-builder` apuntando a GitHub Releases, S3 o un servidor HTTP generico
-3. publicar junto al instalador los metadatos `latest.yml`
-4. conectar el `autoUpdater` desde el proceso principal para buscar, descargar e instalar actualizaciones
+- Dependencia `electron-updater` instalada en la app.
+- Configuracion `publish` de `electron-builder` apuntando a GitHub Releases del repo `DavidCombita/gestion-al-dia-print-agent`.
+- Busqueda automatica de updates al iniciar el agente y comprobacion periodica en segundo plano.
+- Descarga automatica en segundo plano e instalacion al cerrar la aplicacion.
+- Workflow de GitHub Actions en `.github/workflows/release.yml` para compilar y publicar al subir un tag `v*`.
 
-Mientras no se haga esa integracion, el usuario seguira necesitando descargar nuevas versiones manualmente.
+### Como publicar una nueva version
+
+1. Sube el cambio de version en `package.json`.
+2. Crea y empuja un tag con formato `v1.0.1`.
+3. GitHub Actions compilara Windows, generara `latest.yml` y publicara el instalador en GitHub Releases.
+
+Comandos de ejemplo:
+
+```bash
+git tag v1.0.1
+git push origin v1.0.1
+```
+
+### Advertencia importante sobre repo privado
+
+GitHub Releases en un repo **privado** te sirve bien para publicar desde CI, pero **no es una buena opcion para clientes finales** si quieres auto-update transparente.
+
+`electron-updater` solo puede consumir updates desde GitHub privado cuando la maquina cliente tiene `GH_TOKEN`, y la documentacion oficial lo considera un caso especial, no la ruta recomendada para distribucion amplia.
+
+Si este agente lo van a instalar varios clientes, te recomiendo una de estas dos rutas:
+
+1. mantener el repo de codigo privado y publicar los binarios en un repo publico solo de releases
+2. mantener el repo privado y mover los binarios a un servidor HTTP/S3/generic provider
+
+### Si decides seguir con GitHub Releases publico
+
+Solo necesitas cambiar el repo de releases en `publish` si quieres separarlo del repo actual.
+
+### Referencias oficiales
+
+- electron-builder auto update: https://www.electron.build/docs/features/auto-update
+- electron-builder publish: https://www.electron.build/docs/publish
+- electron-builder GitHub Actions: https://www.electron.build/docs/features/github-actions
+
+### Siguiente mejora posible
+
+Si quieres una experiencia mas visible para el usuario, el siguiente paso es agregar una opcion en la bandeja para `Buscar actualizaciones ahora` y otra para `Reiniciar e instalar`.
 
 ## Nota sobre impresion RAW
 

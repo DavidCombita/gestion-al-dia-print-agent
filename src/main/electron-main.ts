@@ -3,6 +3,7 @@ import { app, Tray } from 'electron';
 import { AppConfigService } from '../config/app-config.service';
 import { LoggerService } from '../logs/logger.service';
 import { enableAutoStart } from './auto-start';
+import { startAutoUpdater } from './auto-updater';
 import { openMonitorWindow } from './monitor-window';
 import { createTray } from './tray';
 import { LocalServer } from '../server/local-server';
@@ -17,6 +18,7 @@ let isQuitting = false;
 let loggerInstance: LoggerService | null = null;
 let restartTimer: ReturnType<typeof setTimeout> | null = null;
 let watchdogTimer: ReturnType<typeof setInterval> | null = null;
+let stopAutoUpdater: (() => void) | null = null;
 let runtimeStartedAt = Date.now();
 
 const SINGLE_INSTANCE_LOCK = app.requestSingleInstanceLock();
@@ -96,6 +98,17 @@ async function bootstrap(): Promise<void> {
     },
   });
 
+  stopAutoUpdater?.();
+  stopAutoUpdater = startAutoUpdater({
+    logger,
+    notify: (title, content) => {
+      tray?.displayBalloon?.({
+        title,
+        content,
+      });
+    },
+  });
+
   app.on('window-all-closed', () => {
     // El agente vive en segundo plano y no crea ventanas de trabajo.
   });
@@ -104,6 +117,8 @@ async function bootstrap(): Promise<void> {
     isQuitting = true;
     stopWatchdog();
     clearScheduledRestart();
+    stopAutoUpdater?.();
+    stopAutoUpdater = null;
   });
 
   app.on('activate', () => {

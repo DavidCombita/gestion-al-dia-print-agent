@@ -16,11 +16,13 @@
     "dev": "npm run build && electron .",
     "build": "tsc -p tsconfig.json",
     "dist:win": "npm run build && electron-builder --win nsis",
+    "release:win": "npm run build && electron-builder --win nsis --publish always",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "cors": "^2.8.5",
     "electron-log": "^5.4.1",
+    "electron-updater": "^6.8.3",
     "express": "^5.1.0",
     "printer": "^0.4.0"
   },
@@ -47,6 +49,7 @@
     "asarUnpack": [
       "node_modules/printer/**/*"
     ],
+    "electronUpdaterCompatibility": ">=2.16",
     "extraResources": [
       {
         "from": "build",
@@ -64,6 +67,13 @@
       ],
       "artifactName": "Gestion-al-Dia-Print-Agent-${version}-Setup.${ext}"
     },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "DavidCombita",
+        "repo": "gestion-al-dia-print-agent"
+      }
+    ],
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,

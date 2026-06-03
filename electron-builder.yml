@@ -9,6 +9,7 @@ files:
 asar: true
 asarUnpack:
   - node_modules/printer/**/*
+electronUpdaterCompatibility: '>=2.16'
 extraResources:
   - from: build
     to: build
@@ -20,6 +21,10 @@ win:
   target:
     - nsis
   artifactName: Gestion-al-Dia-Print-Agent-${version}-Setup.${ext}
+publish:
+  - provider: github
+    owner: DavidCombita
+    repo: gestion-al-dia-print-agent
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
