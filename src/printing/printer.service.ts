@@ -27,6 +27,18 @@ type PrinterModule = {
   printDirect: (options: PrintDirectOptions) => void;
 };
 
+type NativePrinterModule = {
+  getPrinters: PrinterModule['getPrinters'];
+  getDefaultPrinterName?: () => string;
+  printDirect: (
+    data: Buffer,
+    printerName: string,
+    documentName: string,
+    type: 'RAW',
+    options: Record<string, unknown>,
+  ) => unknown;
+};
+
 export class PrinterService {
   private printerModule: PrinterModule | null = null;
 
@@ -170,16 +182,45 @@ export class PrinterService {
 
     const attemptedPaths: string[] = [];
     const candidateModulePaths = [
-      'printer',
-      path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'printer'),
+      path.join(
+        process.resourcesPath,
+        'app.asar.unpacked',
+        'node_modules',
+        'printer',
+        'build',
+        'Release',
+        'node_printer.node',
+      ),
       path.join(
         process.resourcesPath,
         'app.asar.unpacked',
         'node_modules',
         'printer',
         'lib',
-        'printer',
+        'node_printer.node',
       ),
+      path.join(
+        __dirname,
+        '..',
+        '..',
+        'node_modules',
+        'printer',
+        'build',
+        'Release',
+        'node_printer.node',
+      ),
+      path.join(
+        __dirname,
+        '..',
+        '..',
+        'node_modules',
+        'printer',
+        'lib',
+        'node_printer.node',
+      ),
+      'printer',
+      path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'printer'),
+      path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'printer', 'lib', 'printer'),
       path.join(__dirname, '..', '..', 'node_modules', 'printer'),
       path.join(__dirname, '..', '..', 'node_modules', 'printer', 'lib', 'printer'),
     ];
@@ -195,18 +236,25 @@ export class PrinterService {
         }
 
         // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const loadedModule = require(candidatePath) as PrinterModule;
+        const loadedModule = require(candidatePath) as PrinterModule | NativePrinterModule;
+        const isNativeBinaryCandidate = candidatePath.endsWith('.node');
 
-        if (
-          loadedModule &&
-          typeof loadedModule.getPrinters === 'function' &&
-          typeof loadedModule.printDirect === 'function'
-        ) {
+        if (isNativeBinaryCandidate && isNativePrinterModule(loadedModule)) {
+          this.printerModule = createPrinterModuleFromNative(loadedModule);
+          this.logger.info('Modulo nativo de impresion cargado correctamente.', {
+            candidatePath,
+            mode: 'native-binary',
+          });
+          return this.printerModule;
+        }
+
+        if (!isNativeBinaryCandidate && isPrinterModule(loadedModule)) {
           this.printerModule = loadedModule;
           this.logger.info('Modulo nativo de impresion cargado correctamente.', {
             candidatePath,
+            mode: 'package-wrapper',
           });
-          return this.printerModule;
+          return loadedModule;
         }
       } catch (error) {
         lastError = error;
@@ -265,6 +313,51 @@ function resolvePrinterDisplayName(printer: {
     (typeof printer.printerName === 'string' && printer.printerName.trim());
 
   return candidateName || 'Impresora sin nombre';
+}
+
+function isNativePrinterModule(value: unknown): value is NativePrinterModule {
+  return Boolean(
+    value &&
+      typeof value === 'object' &&
+      typeof (value as NativePrinterModule).getPrinters === 'function' &&
+      typeof (value as NativePrinterModule).printDirect === 'function',
+  );
+}
+
+function isPrinterModule(value: unknown): value is PrinterModule {
+  return Boolean(
+    value &&
+      typeof value === 'object' &&
+      typeof (value as PrinterModule).getPrinters === 'function' &&
+      typeof (value as PrinterModule).printDirect === 'function',
+  );
+}
+
+function createPrinterModuleFromNative(nativePrinter: NativePrinterModule): PrinterModule {
+  return {
+    getPrinters: nativePrinter.getPrinters.bind(nativePrinter),
+    getDefaultPrinterName:
+      typeof nativePrinter.getDefaultPrinterName === 'function'
+        ? nativePrinter.getDefaultPrinterName.bind(nativePrinter)
+        : undefined,
+    printDirect: (options: PrintDirectOptions) => {
+      const printerName = options.printer.trim() || nativePrinter.getDefaultPrinterName?.() || '';
+      const documentName = options.docname.trim() || 'Gestion al Dia Print Agent';
+
+      try {
+        nativePrinter.printDirect(
+          options.data,
+          printerName,
+          documentName,
+          options.type,
+          {},
+        );
+        options.success();
+      } catch (error) {
+        options.error(error);
+      }
+    },
+  };
 }
 
 function modulePathExists(modulePath: string): boolean {
