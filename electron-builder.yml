@@ -25,6 +25,7 @@ publish:
   - provider: github
     owner: DavidCombita
     repo: gestion-al-dia-print-agent
+    releaseType: release
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
