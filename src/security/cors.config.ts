@@ -19,6 +19,11 @@ export function createCorsOptions(configService: AppConfigService): CorsOptions 
     },
     credentials: false,
     methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Gestion-Print-Token'],
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization',
+      'X-Gestion-Print-Token',
+      'X-GAD-Print-Token',
+    ],
   };
 }

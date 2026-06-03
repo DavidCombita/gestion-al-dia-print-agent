@@ -1,10 +1,12 @@
-import { Menu, Tray, nativeImage, shell } from 'electron';
+import path from 'node:path';
+import { app, Menu, Tray, nativeImage, shell } from 'electron';
 import { AppConfigService } from '../config/app-config.service';
 import { LocalServer } from '../server/local-server';
 
 interface TrayDependencies {
   localServer: LocalServer;
   configService: AppConfigService;
+  onOpenMonitor: () => Promise<void>;
   onQuit: () => void;
   onRestart: () => Promise<void>;
 }
@@ -17,6 +19,12 @@ export function createTray(dependencies: TrayDependencies): Tray {
     {
       label: 'Gestion al Dia Print Agent',
       enabled: false,
+    },
+    {
+      label: 'Ver historial de impresiones',
+      click: async () => {
+        await dependencies.onOpenMonitor();
+      },
     },
     {
       label: 'Abrir carpeta de configuracion',
@@ -44,7 +52,22 @@ export function createTray(dependencies: TrayDependencies): Tray {
 }
 
 function buildTrayIcon() {
+  const baseIconDirectory = app.isPackaged
+    ? path.join(process.resourcesPath, 'build')
+    : path.join(app.getAppPath(), 'build');
+
+  const iconCandidates = ['tray-icon.png', 'icon.ico'];
+
+  for (const fileName of iconCandidates) {
+    const iconPath = path.join(baseIconDirectory, fileName);
+    const icon = nativeImage.createFromPath(iconPath);
+
+    if (!icon.isEmpty()) {
+      return icon.resize({ width: 16, height: 16, quality: 'best' });
+    }
+  }
+
   return nativeImage.createFromDataURL(
-    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAQAAAC1+jfqAAAAr0lEQVR4AYXQMQrCQBRF0f9xQ7QWVi4v0hN4G8GSsLG3sLS0sLMQbCys7Ky9hULRCQnydQ4M2M6T3JmZkfrGNzm1jzA6hhgmyE91Csr4Y4l+WQy+7AORn8YZg5hKnk0V9H+g7WIXqVUw0aPE0xRjWiWFy20tqJ6JnhLtAz4VTAkEmXjGGp8f7tDU9fBHs4IYlQ0h11+g63r0G/kTuv8V6oB4w7OZjNDiZdAAAAAElFTkSuQmCC',
+    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAMAAAAoLQ9TAAAAeFBMVEVHcEyAlvSAlvSAlvSAlvSAlvSAlvSAlvSAlvSAlvSAlvSAlvSAlvSAlvSAlvSAlvSAlvSAlvSAlvSAlvSAlvSAlvSAlvSAlvSAlvSAlvSAlvSAlvSAlvSAlvSAlvSAlvSAlvSAlvQevnyrAAAAJ3RSTlMAAwgQFiIlLz5AR1JZXGJqdX+Ah5Kcoq+1xN3f6vL0+P3+TAw6mAAAAJVJREFUGNNjYMAKZmFlYWVj5+Dk4ubh5eMXEBQSFhEVE5eQlJKWkZWTV1BUUlZT19DU0tbR1dM3MjYxNTO3sbWxBQAtdQx2Sv8UUQAAAABJRU5ErkJggg==',
   );
 }

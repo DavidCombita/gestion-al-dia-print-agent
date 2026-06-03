@@ -47,7 +47,18 @@
     "asarUnpack": [
       "node_modules/printer/**/*"
     ],
+    "extraResources": [
+      {
+        "from": "build",
+        "to": "build",
+        "filter": [
+          "icon.ico",
+          "tray-icon.png"
+        ]
+      }
+    ],
     "win": {
+      "icon": "build/icon.ico",
       "target": [
         "nsis"
       ],

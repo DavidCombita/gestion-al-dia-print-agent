@@ -3,8 +3,10 @@ import { app, Tray } from 'electron';
 import { AppConfigService } from '../config/app-config.service';
 import { LoggerService } from '../logs/logger.service';
 import { enableAutoStart } from './auto-start';
+import { openMonitorWindow } from './monitor-window';
 import { createTray } from './tray';
 import { LocalServer } from '../server/local-server';
+import { PrintHistoryService } from '../printing/print-history.service';
 import { PrinterService } from '../printing/printer.service';
 import { PrintQueueService } from '../printing/print-queue.service';
 import { PairingTokenService } from '../security/pairing-token.service';
@@ -43,7 +45,9 @@ async function bootstrap(): Promise<void> {
   const logger = loggerInstance ?? new LoggerService(userDataPath);
   loggerInstance = logger;
   const configDirectory = path.join(userDataPath, 'config');
+  const historyDirectory = path.join(userDataPath, 'history');
   const configService = new AppConfigService(configDirectory, logger);
+  const printHistoryService = new PrintHistoryService(historyDirectory, logger);
   const printerService = new PrinterService(configService, logger);
   const queueService = new PrintQueueService(logger);
   const pairingTokenService = new PairingTokenService();
@@ -55,6 +59,7 @@ async function bootstrap(): Promise<void> {
     logger,
     queueService,
     printerService,
+    printHistoryService,
     pairingTokenService,
     onServerUnavailable: (reason, error) => {
       logger.warn('El servidor local reporto una falla y se intentara recuperar.', {
@@ -71,6 +76,14 @@ async function bootstrap(): Promise<void> {
   tray = createTray({
     localServer,
     configService,
+    onOpenMonitor: async () => {
+      if (!localServer) {
+        return;
+      }
+
+      await ensureLocalServerStarted();
+      await openMonitorWindow(new URL('monitor', localServer.getBaseUrl()).toString());
+    },
     onQuit: async () => {
       isQuitting = true;
       stopWatchdog();
@@ -106,6 +119,12 @@ async function bootstrap(): Promise<void> {
 }
 
 app.on('second-instance', () => {
+  if (localServer && !localServer.isRunning()) {
+    void restartLocalServer('second-instance');
+  } else if (!localServer) {
+    void bootstrap();
+  }
+
   tray?.displayBalloon?.({
     title: 'Gestion al Dia Print Agent',
     content: 'El agente local ya se encuentra en ejecucion.',
@@ -144,7 +163,6 @@ async function ensureLocalServerStarted(): Promise<void> {
   } catch (error) {
     loggerInstance?.error('No fue posible iniciar el servidor local.', error);
     scheduleRestart('startup-failure');
-    throw error;
   }
 }
 

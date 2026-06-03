@@ -93,3 +93,19 @@ export interface AgentMutationResponse {
   success: boolean;
   message: string;
 }
+
+export type PrintJobStatus = 'queued' | 'processing' | 'completed' | 'failed';
+
+export interface PrintJobRecord {
+  id: string;
+  label: string;
+  printerName: string;
+  status: PrintJobStatus;
+  createdAt: string;
+  updatedAt: string;
+  errorMessage?: string;
+}
+
+export interface PrintJobsResponse {
+  jobs: PrintJobRecord[];
+}

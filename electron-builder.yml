@@ -7,7 +7,16 @@ files:
   - dist/**/*
   - package.json
 asar: true
+asarUnpack:
+  - node_modules/printer/**/*
+extraResources:
+  - from: build
+    to: build
+    filter:
+      - icon.ico
+      - tray-icon.png
 win:
+  icon: build/icon.ico
   target:
     - nsis
   artifactName: Gestion-al-Dia-Print-Agent-${version}-Setup.${ext}

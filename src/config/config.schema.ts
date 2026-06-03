@@ -14,7 +14,9 @@ export interface AppConfig {
 
 export const DEFAULT_ALLOWED_ORIGINS = [
   'http://localhost:4200',
+  'http://127.0.0.1:4200',
   'https://aldia-co.com',
+  'https://www.aldia-co.com',
 ];
 
 export const defaultAppConfig: AppConfig = {
@@ -73,14 +75,26 @@ function normalizePaperWidth(value: unknown): PaperWidth {
 }
 
 function normalizeAllowedOrigins(value: unknown): string[] {
-  if (!Array.isArray(value)) {
-    return DEFAULT_ALLOWED_ORIGINS;
+  const configuredOrigins = Array.isArray(value)
+    ? value
+        .filter((origin): origin is string => typeof origin === 'string')
+        .map(normalizeOrigin)
+        .filter((origin): origin is string => origin !== null)
+    : [];
+
+  return Array.from(new Set([...DEFAULT_ALLOWED_ORIGINS, ...configuredOrigins]));
+}
+
+function normalizeOrigin(value: string): string | null {
+  const trimmedValue = value.trim();
+
+  if (!trimmedValue) {
+    return null;
   }
 
-  const origins = value
-    .filter((origin): origin is string => typeof origin === 'string')
-    .map((origin) => origin.trim())
-    .filter((origin) => origin.length > 0);
-
-  return origins.length ? origins : DEFAULT_ALLOWED_ORIGINS;
+  try {
+    return new URL(trimmedValue).origin;
+  } catch {
+    return trimmedValue.replace(/\/+$/, '');
+  }
 }
