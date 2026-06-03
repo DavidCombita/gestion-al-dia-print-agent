@@ -1,13 +1,12 @@
 import log from 'electron-log/main';
-import electronUpdater, {
+import {
+  autoUpdater,
   type ProgressInfo,
   type UpdateDownloadedEvent,
   type UpdateInfo,
 } from 'electron-updater';
 import { app } from 'electron';
 import { LoggerService } from '../logs/logger.service';
-
-const { autoUpdater } = electronUpdater;
 
 const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const INITIAL_UPDATE_CHECK_DELAY_MS = 15_000;
