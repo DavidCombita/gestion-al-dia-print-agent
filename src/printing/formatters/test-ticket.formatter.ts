@@ -5,5 +5,6 @@ export function formatTestTicket(payload: ReceiptJobPayload): Buffer {
   return buildEscPosDocument(payload, {
     title: 'Ticket de prueba',
     showTotals: true,
+    showBusinessContactAtFooter: true,
   });
 }

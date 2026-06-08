@@ -453,8 +453,8 @@ function buildTestPayload(paperWidth: '58mm' | '80mm'): ReceiptJobPayload {
     business: {
       name: 'Gestion al Dia',
       nit: '900123456-7',
-      address: 'Prueba local del agente',
-      phone: '3000000000',
+      address: 'Calle 123 #45-67',
+      phone: '+57 300 123 4567',
     },
     order: {
       id: 'TEST-001',
