@@ -88,7 +88,7 @@ La base actual del agente ya es compatible con el objetivo correcto para Windows
 ### Lo que ya quedo integrado
 
 - Dependencia `electron-updater` instalada en la app.
-- Flujo de GitHub Actions que compila primero y luego crea/actualiza un `draft` en GitHub Releases con los assets generados.
+- Flujo de GitHub Actions que compila primero con `--publish never` y luego crea/actualiza un `draft` en GitHub Releases con los assets generados.
 - Busqueda automatica de updates al iniciar el agente y comprobacion periodica en segundo plano.
 - Descarga automatica en segundo plano e instalacion al cerrar la aplicacion.
 - Workflow de GitHub Actions en `.github/workflows/release.yml` para compilar y publicar al subir un tag `v*`.
