@@ -96,8 +96,9 @@ La base actual del agente ya es compatible con el objetivo correcto para Windows
 ### Como publicar una nueva version
 
 1. Sube el cambio de version en `package.json`.
-2. Crea y empuja un tag con formato `v1.0.1`.
-3. GitHub Actions compilara Windows, generara `latest.yml` y publicara la release de GitHub con el `.exe`, el `.blockmap` y el `latest.yml`.
+2. Ejecuta manualmente el workflow `Release Print Agent` desde GitHub Actions, o crea y empuja un tag con formato `v1.0.1`.
+3. GitHub Actions compilara Windows, creara el tag si hace falta, generara `latest.yml` y publicara la release de GitHub con el `.exe`, el `.blockmap` y el `latest.yml`.
+4. No crees ni publiques esa version desde la pantalla de GitHub Releases antes de correr Actions; con releases inmutables cada tag se usa una sola vez.
 
 Comandos de ejemplo:
 

@@ -46,8 +46,7 @@ jobs:
             core.info(`Version detectada: ${version}`);
             core.info(`Tag objetivo: ${tag}`);
 
-      - name: Validate release tag state
-        id: release_state
+      - name: Ensure release tag is unused
         uses: actions/github-script@v7
         with:
           script: |
@@ -60,19 +59,12 @@ jobs:
                 tag,
               });
 
-              if (!data.draft) {
-                core.setFailed(
-                  `Ya existe una release publicada para ${tag}. Elimina esa release o usa una nueva version antes de volver a ejecutar el workflow.`,
-                );
-                return;
-              }
-
-              core.setOutput('state', 'draft');
-              core.info(`Se encontro un draft existente para ${tag}; se reutilizara en esta ejecucion.`);
+              core.setFailed(
+                `Ya existe una release para ${tag}. Con releases inmutables no se reutilizan tags; sube una nueva version.`,
+              );
             } catch (error) {
               if (error.status === 404) {
-                core.setOutput('state', 'missing');
-                core.info(`No existe una release previa para ${tag}; continuando con la publicacion.`);
+                core.info(`No existe una release previa para ${tag}; continuando.`);
                 return;
               }
 
@@ -88,26 +80,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ steps.release_meta.outputs.tag }}"
-          STATE="${{ steps.release_state.outputs.state }}"
-
-          if [ "$STATE" = "draft" ]; then
-            gh release upload "$TAG" \
-              release/*.exe \
-              release/*.blockmap \
-              release/latest*.yml \
-              --clobber
-
-            gh release edit "$TAG" \
-              --draft=false \
-              --title "$TAG"
-
-            exit 0
-          fi
 
           gh release create "$TAG" \
             release/*.exe \
             release/*.blockmap \
             release/latest*.yml \
-            --verify-tag \
+            --target "${GITHUB_SHA}" \
             --title "$TAG" \
             --generate-notes
