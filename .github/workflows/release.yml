@@ -29,6 +29,36 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      - name: Validate release tag state
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = context.ref.replace('refs/tags/', '');
+
+            try {
+              const { data } = await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag,
+              });
+
+              if (!data.draft) {
+                core.setFailed(
+                  `Ya existe una release publicada para ${tag}. Elimina esa release o usa una nueva version antes de volver a ejecutar el workflow.`,
+                );
+                return;
+              }
+
+              core.info(`Se encontro un draft existente para ${tag}; se reutilizara en esta ejecucion.`);
+            } catch (error) {
+              if (error.status === 404) {
+                core.info(`No existe una release previa para ${tag}; continuando con la publicacion.`);
+                return;
+              }
+
+              throw error;
+            }
+
       - name: Build and publish Windows release
         run: npm run release:win
         env:
