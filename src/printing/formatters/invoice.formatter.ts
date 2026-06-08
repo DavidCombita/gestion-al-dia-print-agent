@@ -5,5 +5,6 @@ export function formatInvoice(payload: ReceiptJobPayload): Buffer {
   return buildEscPosDocument(payload, {
     title: 'Factura',
     showTotals: true,
+    showBusinessContactAtFooter: true,
   });
 }

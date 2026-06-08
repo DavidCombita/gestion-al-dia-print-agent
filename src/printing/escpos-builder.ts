@@ -7,6 +7,7 @@ const CODE_PAGE_CP850 = 0x02;
 export interface EscPosDocumentOptions {
   title: string;
   showTotals: boolean;
+  showBusinessContactAtFooter?: boolean;
 }
 
 type Alignment = 'left' | 'center' | 'right';
@@ -26,9 +27,13 @@ export function buildEscPosDocument(
     options.title.trim().toUpperCase(),
     payload.business.name.trim(),
     payload.business.nit ? `NIT ${payload.business.nit.trim()}` : '',
-    payload.business.address?.trim() ?? '',
-    payload.business.phone?.trim() ?? '',
   ].filter(Boolean);
+  const footerContactLines = options.showBusinessContactAtFooter
+    ? [
+        payload.business.address?.trim() ?? '',
+        payload.business.phone?.trim() ?? '',
+      ].filter(Boolean)
+    : [];
 
   chunks.push(align('center'));
   chunks.push(command(ESC, 0x45, 0x01));
@@ -80,6 +85,9 @@ export function buildEscPosDocument(
   chunks.push(align('center'));
   chunks.push(line('Gracias por tu compra'));
   chunks.push(line('Gestion al Dia'));
+  for (const contactLine of footerContactLines) {
+    chunks.push(line(contactLine));
+  }
   chunks.push(feed(5));
 
   if (payload.options?.openCashDrawer) {
