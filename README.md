@@ -88,7 +88,7 @@ La base actual del agente ya es compatible con el objetivo correcto para Windows
 ### Lo que ya quedo integrado
 
 - Dependencia `electron-updater` instalada en la app.
-- Flujo de GitHub Actions que compila primero con `--publish never` y luego crea/actualiza un `draft` en GitHub Releases con los assets generados.
+- Flujo de GitHub Actions que compila primero con `--publish never` y luego publica la release final en GitHub usando `gh release create` con todos los assets ya generados.
 - Busqueda automatica de updates al iniciar el agente y comprobacion periodica en segundo plano.
 - Descarga automatica en segundo plano e instalacion al cerrar la aplicacion.
 - Workflow de GitHub Actions en `.github/workflows/release.yml` para compilar y publicar al subir un tag `v*`.
@@ -96,9 +96,8 @@ La base actual del agente ya es compatible con el objetivo correcto para Windows
 ### Como publicar una nueva version
 
 1. Sube el cambio de version en `package.json`.
-2. Crea y empuja un tag con formato `v1.0.1`, o ejecuta manualmente el workflow desde GitHub Actions.
-3. GitHub Actions compilara Windows, generara `latest.yml` y creara/actualizara un draft de GitHub Releases con el `.exe`, el `.blockmap` y el `latest.yml`.
-4. En GitHub Releases, abre el draft y publícalo manualmente cuando verifiques que los assets quedaron completos.
+2. Crea y empuja un tag con formato `v1.0.1`.
+3. GitHub Actions compilara Windows, generara `latest.yml` y publicara la release de GitHub con el `.exe`, el `.blockmap` y el `latest.yml`.
 
 Comandos de ejemplo:
 
