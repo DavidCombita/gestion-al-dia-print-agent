@@ -89,6 +89,7 @@ La base actual del agente ya es compatible con el objetivo correcto para Windows
 
 - Dependencia `electron-updater` instalada en la app.
 - Configuracion `publish` de `electron-builder` apuntando a GitHub Releases del repo `DavidCombita/gestion-al-dia-print-agent`.
+- La release se sube como `draft` para permitir la carga de assets antes de publicarla manualmente en GitHub.
 - Busqueda automatica de updates al iniciar el agente y comprobacion periodica en segundo plano.
 - Descarga automatica en segundo plano e instalacion al cerrar la aplicacion.
 - Workflow de GitHub Actions en `.github/workflows/release.yml` para compilar y publicar al subir un tag `v*`.
@@ -97,7 +98,8 @@ La base actual del agente ya es compatible con el objetivo correcto para Windows
 
 1. Sube el cambio de version en `package.json`.
 2. Crea y empuja un tag con formato `v1.0.1`.
-3. GitHub Actions compilara Windows, generara `latest.yml` y publicara el instalador en GitHub Releases.
+3. GitHub Actions compilara Windows, generara `latest.yml` y subira el instalador a un draft de GitHub Releases.
+4. En GitHub Releases, abre el draft y publícalo manualmente cuando verifiques que los assets quedaron completos.
 
 Comandos de ejemplo:
 
