@@ -99,8 +99,8 @@ export class BackendPrintClientService {
     }
   }
 
-  async register(pairingCode: string, backendBaseUrl?: string): Promise<RegisterBackendAgentResponse> {
-    const baseUrl = this.resolveBaseUrl(backendBaseUrl);
+  async register(pairingCode: string): Promise<RegisterBackendAgentResponse> {
+    const baseUrl = this.resolveBaseUrl();
     const response = await this.request<RegisterBackendAgentResponse>(
       baseUrl,
       '/print-agents/register',
@@ -119,7 +119,7 @@ export class BackendPrintClientService {
     );
 
     this.dependencies.configService.saveConfig({
-      backendBaseUrl: baseUrl,
+      backendBaseUrl: null,
       backendAgentId: response.agentId,
       backendBusinessId: response.businessId,
       backendDeviceToken: response.deviceToken,
@@ -136,7 +136,7 @@ export class BackendPrintClientService {
       return;
     }
 
-    const socketBaseUrl = new URL(this.resolveBaseUrl(config.backendBaseUrl));
+    const socketBaseUrl = new URL(this.resolveBaseUrl());
     this.socket = io(`${socketBaseUrl.origin}/print-agents`, {
       auth: { token },
       transports: ['websocket', 'polling'],
@@ -165,7 +165,7 @@ export class BackendPrintClientService {
     }
 
     try {
-      await this.request(this.resolveBaseUrl(config.backendBaseUrl), '/print-agents/heartbeat', {
+      await this.request(this.resolveBaseUrl(), '/print-agents/heartbeat', {
         method: 'POST',
         body: { version: this.dependencies.version },
       }, token);
@@ -184,7 +184,7 @@ export class BackendPrintClientService {
 
     try {
       const printers = await this.dependencies.printerService.listPrinters();
-      await this.request(this.resolveBaseUrl(config.backendBaseUrl), '/print-agents/printers/sync', {
+      await this.request(this.resolveBaseUrl(), '/print-agents/printers/sync', {
         method: 'POST',
         body: {
           printers: printers.map((printer) => ({
@@ -215,7 +215,7 @@ export class BackendPrintClientService {
 
     try {
       const job = await this.request<BackendPrintJob | null>(
-        this.resolveBaseUrl(config.backendBaseUrl),
+        this.resolveBaseUrl(),
         '/print-jobs/next-pending',
         { method: 'GET' },
         token,
@@ -226,7 +226,7 @@ export class BackendPrintClientService {
       }
 
       const claimedJob = await this.request<BackendPrintJob>(
-        this.resolveBaseUrl(config.backendBaseUrl),
+        this.resolveBaseUrl(),
         `/print-jobs/${encodeURIComponent(job.id)}/claim`,
         { method: 'POST' },
         token,
@@ -241,7 +241,7 @@ export class BackendPrintClientService {
   }
 
   private async printClaimedJob(job: BackendPrintJob, token: string): Promise<void> {
-    const baseUrl = this.resolveBaseUrl(this.dependencies.configService.getConfig().backendBaseUrl);
+    const baseUrl = this.resolveBaseUrl();
     const printerName = job.printer.systemName || job.printer.name;
     const payload = this.normalizePayload(job);
     const copies = Math.max(1, Math.min(5, Math.trunc(payload.options?.copies ?? job.printer.copies ?? 1)));
@@ -319,8 +319,8 @@ export class BackendPrintClientService {
     return (await response.json()) as T;
   }
 
-  private resolveBaseUrl(value: string | null | undefined): string {
-    return value?.trim() || DEFAULT_BACKEND_BASE_URL;
+  private resolveBaseUrl(): string {
+    return DEFAULT_BACKEND_BASE_URL;
   }
 
   private resolveDeviceName(): string {

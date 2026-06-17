@@ -266,16 +266,12 @@ export class LocalServer {
     this.app.post('/backend/register', async (request, response, next) => {
       try {
         const pairingCode = normalizeNullableString(request.body?.pairingCode, null);
-        const backendBaseUrl = normalizeNullableString(request.body?.backendBaseUrl, null);
 
         if (!pairingCode) {
           throw new Error('Ingresa el codigo de vinculacion generado en Gestion al Dia.');
         }
 
-        const registration = await this.dependencies.backendPrintClient.register(
-          pairingCode,
-          backendBaseUrl ?? undefined,
-        );
+        const registration = await this.dependencies.backendPrintClient.register(pairingCode);
 
         response.json({
           success: true,
@@ -1012,26 +1008,11 @@ function buildMonitorPage(): string {
               />
             </label>
 
-            <label class="field">
-              <span>URL del backend (opcional)</span>
-              <input
-                id="backend-base-url"
-                name="backendBaseUrl"
-                type="url"
-                placeholder="https://tu-backend"
-              />
-            </label>
-
             <div class="form-actions">
               <button id="backend-register-submit" class="button button--primary" type="submit">
                 Vincular agente
               </button>
             </div>
-
-            <p class="form-help">
-              Si dejas la URL vacia, el agente usara la direccion predeterminada configurada para
-              Produccion.
-            </p>
 
             <div id="backend-register-feedback" class="notice" hidden></div>
           </form>
@@ -1064,12 +1045,10 @@ function buildMonitorPage(): string {
       const backendBusinessIdNode = document.getElementById('backend-business-id');
       const backendRegisterForm = document.getElementById('backend-register-form');
       const pairingCodeInput = document.getElementById('pairing-code');
-      const backendBaseUrlInput = document.getElementById('backend-base-url');
       const backendRegisterSubmit = document.getElementById('backend-register-submit');
       const backendRegisterFeedback = document.getElementById('backend-register-feedback');
       const tableContainerNode = document.getElementById('table-container');
       const manualRefreshButton = document.getElementById('manual-refresh');
-      let backendBaseUrlWasEdited = false;
 
       function formatDate(value) {
         try {
@@ -1108,13 +1087,9 @@ function buildMonitorPage(): string {
         backendStatusDetailNode.textContent = linked
           ? 'El agente ya puede recibir trabajos desde el backend.'
           : 'Ingresa el codigo temporal para registrar este equipo.';
-        backendBaseUrlCurrentNode.textContent = backend.baseUrl || 'Sin configurar';
+        backendBaseUrlCurrentNode.textContent = backend.baseUrl || 'URL oficial del agente';
         backendAgentIdNode.textContent = backend.agentId || 'Sin registrar';
         backendBusinessIdNode.textContent = backend.businessId || 'Sin registrar';
-
-        if (!backendBaseUrlWasEdited && !backendBaseUrlInput.value.trim() && backend.baseUrl) {
-          backendBaseUrlInput.value = backend.baseUrl;
-        }
       }
 
       function clearBackendFeedback() {
@@ -1222,7 +1197,6 @@ function buildMonitorPage(): string {
         event.preventDefault();
 
         const pairingCode = pairingCodeInput.value.trim();
-        const backendBaseUrl = backendBaseUrlInput.value.trim();
         clearBackendFeedback();
 
         if (!pairingCode) {
@@ -1241,7 +1215,6 @@ function buildMonitorPage(): string {
             },
             body: JSON.stringify({
               pairingCode,
-              backendBaseUrl: backendBaseUrl || null,
             }),
           });
           const payload = await response.json().catch(() => null);
@@ -1262,10 +1235,6 @@ function buildMonitorPage(): string {
           backendRegisterSubmit.disabled = false;
         }
       }
-
-      backendBaseUrlInput.addEventListener('input', () => {
-        backendBaseUrlWasEdited = true;
-      });
 
       backendRegisterForm.addEventListener('submit', (event) => {
         void registerBackend(event);

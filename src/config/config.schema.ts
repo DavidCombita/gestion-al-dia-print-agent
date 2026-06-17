@@ -52,7 +52,7 @@ export function sanitizeAppConfig(value: unknown): AppConfig {
     paperWidth: normalizePaperWidth(record.paperWidth),
     pairingToken: normalizeNullableString(record.pairingToken),
     allowedOrigins: normalizeAllowedOrigins(record.allowedOrigins),
-    backendBaseUrl: normalizeNullableString(record.backendBaseUrl),
+    backendBaseUrl: null,
     backendAgentId: normalizeNullableString(record.backendAgentId),
     backendBusinessId: normalizeNullableString(record.backendBusinessId),
     backendDeviceToken: normalizeNullableString(record.backendDeviceToken),
