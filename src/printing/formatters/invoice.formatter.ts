@@ -3,7 +3,7 @@ import { buildEscPosDocument } from '../escpos-builder';
 
 export function formatInvoice(payload: ReceiptJobPayload): Buffer {
   return buildEscPosDocument(payload, {
-    title: 'Factura',
+    title: payload.title?.trim() || 'Factura',
     showTotals: true,
     showBusinessContactAtFooter: true,
   });

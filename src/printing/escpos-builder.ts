@@ -73,11 +73,20 @@ export function buildEscPosDocument(
     chunks.push(summaryLine('Subtotal', payload.totals.subtotal, columns));
     chunks.push(summaryLine('Impuestos', payload.totals.tax, columns));
     chunks.push(summaryLine('Descuento', payload.totals.discount, columns));
+    chunks.push(summaryLine('Propina', payload.totals.tip, columns));
     chunks.push(command(ESC, 0x45, 0x01));
     chunks.push(summaryLine('TOTAL', payload.totals.total, columns));
     chunks.push(command(ESC, 0x45, 0x00));
     chunks.push(summaryLine('Pagado', payload.totals.paid, columns));
     chunks.push(summaryLine('Cambio', payload.totals.change, columns));
+    chunks.push(line(divider(columns)));
+  }
+
+  if (payload.paymentBreakdown?.length) {
+    chunks.push(line('METODOS DE PAGO'));
+    for (const payment of payload.paymentBreakdown) {
+      chunks.push(summaryLine(payment.label, payment.amount, columns));
+    }
     chunks.push(line(divider(columns)));
   }
 

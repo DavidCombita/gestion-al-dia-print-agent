@@ -65,9 +65,15 @@ export interface TotalsPrintPayload {
   subtotal?: number;
   tax?: number;
   discount?: number;
+  tip?: number;
   total?: number;
   paid?: number;
   change?: number;
+}
+
+export interface PaymentBreakdownPrintPayload {
+  label: string;
+  amount: number;
 }
 
 export interface PrintOptionsPayload {
@@ -80,8 +86,11 @@ export interface PrintOptionsPayload {
 export interface ReceiptJobPayload {
   business: BusinessPrintPayload;
   order: OrderPrintPayload;
+  title?: string;
   items: PrintItemPayload[];
   totals?: TotalsPrintPayload;
+  paymentMethod?: string;
+  paymentBreakdown?: PaymentBreakdownPrintPayload[];
   options?: PrintOptionsPayload;
 }
 
