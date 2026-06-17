@@ -9,6 +9,12 @@ export interface AgentHealthResponse {
   configured: boolean;
   printerModuleReady: boolean;
   printerModuleError?: string;
+  backend: {
+    linked: boolean;
+    baseUrl: string | null;
+    agentId: string | null;
+    businessId: string | null;
+  };
   uptimeSeconds?: number;
   queue?: {
     pendingJobs: number;

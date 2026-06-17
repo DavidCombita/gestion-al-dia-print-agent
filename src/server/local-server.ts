@@ -185,6 +185,12 @@ export class LocalServer {
         configured: Boolean(config.invoicePrinterName || config.kitchenPrinterName),
         printerModuleReady: printerModuleStatus.ready,
         printerModuleError: printerModuleStatus.error,
+        backend: {
+          linked: Boolean(config.backendDeviceToken),
+          baseUrl: config.backendBaseUrl,
+          agentId: config.backendAgentId,
+          businessId: config.backendBusinessId,
+        },
         uptimeSeconds: Math.max(
           0,
           Math.floor((Date.now() - this.dependencies.startedAt) / 1000),
@@ -527,6 +533,15 @@ function isTrustedRecoveryRequest(
   request: Request,
   configService: AppConfigService,
 ): boolean {
+  if (request.path === '/backend/register') {
+    return (
+      request.method === 'POST' &&
+      isLoopbackAddress(request.socket.remoteAddress) &&
+      (isLocalAgentOrigin(request.header('origin')) ||
+        isLocalAgentOrigin(request.header('referer')))
+    );
+  }
+
   if (request.method !== 'GET') {
     return false;
   }
@@ -541,6 +556,18 @@ function isTrustedRecoveryRequest(
   }
 
   return isLoopbackAddress(request.socket.remoteAddress);
+}
+
+function isLocalAgentOrigin(value: string | undefined): boolean {
+  if (!value) {
+    return false;
+  }
+
+  try {
+    return new URL(value).origin === `http://${HOST}:${PORT}`;
+  } catch {
+    return false;
+  }
 }
 
 function isLoopbackAddress(value: string | undefined): boolean {
@@ -662,6 +689,7 @@ function buildMonitorPage(): string {
         border-radius: 24px;
         box-shadow: var(--shadow);
         overflow: hidden;
+        margin-bottom: 24px;
       }
 
       .panel__head {
@@ -682,6 +710,17 @@ function buildMonitorPage(): string {
       .panel__head p {
         margin: 0;
         color: var(--muted);
+      }
+
+      .panel__body {
+        padding: 22px;
+      }
+
+      .panel__body--split {
+        display: grid;
+        grid-template-columns: minmax(260px, 1fr) minmax(320px, 1.15fr);
+        gap: 20px;
+        align-items: start;
       }
 
       .status {
@@ -761,6 +800,118 @@ function buildMonitorPage(): string {
         line-height: 1.45;
       }
 
+      .backend-meta {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 12px;
+      }
+
+      .meta-item {
+        padding: 16px;
+        border-radius: 18px;
+        border: 1px solid var(--border);
+        background: var(--surface-soft);
+      }
+
+      .meta-item span {
+        display: block;
+        margin-bottom: 8px;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+
+      .meta-item strong {
+        display: block;
+        font-size: 14px;
+        line-height: 1.45;
+        word-break: break-word;
+      }
+
+      .form-stack {
+        display: grid;
+        gap: 14px;
+      }
+
+      .field {
+        display: grid;
+        gap: 8px;
+      }
+
+      .field span {
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      .field input {
+        width: 100%;
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 12px 14px;
+        font: inherit;
+        color: var(--text);
+        background: #fff;
+      }
+
+      .field input:focus {
+        outline: 2px solid rgba(31, 120, 255, 0.16);
+        border-color: var(--accent);
+      }
+
+      .form-actions {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+
+      .button {
+        border: none;
+        border-radius: 999px;
+        padding: 12px 18px;
+        font: inherit;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      .button--primary {
+        background: var(--accent);
+        color: #fff;
+        box-shadow: var(--shadow);
+      }
+
+      .button:disabled {
+        opacity: 0.7;
+        cursor: wait;
+      }
+
+      .form-help {
+        margin: 0;
+        color: var(--muted);
+        line-height: 1.5;
+        font-size: 13px;
+      }
+
+      .notice {
+        border-radius: 16px;
+        padding: 14px 16px;
+        line-height: 1.5;
+        font-size: 14px;
+      }
+
+      .notice--ok {
+        color: var(--ok);
+        border: 1px solid rgba(19, 138, 82, 0.2);
+        background: rgba(19, 138, 82, 0.12);
+      }
+
+      .notice--error {
+        color: var(--error);
+        border: 1px solid rgba(192, 57, 43, 0.18);
+        background: rgba(192, 57, 43, 0.1);
+      }
+
       @media (max-width: 760px) {
         main {
           padding: 20px 14px 32px;
@@ -770,6 +921,10 @@ function buildMonitorPage(): string {
         .panel__head {
           flex-direction: column;
           align-items: flex-start;
+        }
+
+        .panel__body--split {
+          grid-template-columns: 1fr;
         }
 
         th:nth-child(4),
@@ -783,10 +938,10 @@ function buildMonitorPage(): string {
     <main>
       <section class="hero">
         <div>
-          <h1>Monitor del agente de impresion</h1>
+          <h1>Monitor y configuracion del agente de impresion</h1>
           <p>
-            Aqui puedes ver el estado del servicio local y los ultimos trabajos que se enviaron
-            a las impresoras configuradas en este equipo.
+            Aqui puedes ver el estado del servicio local, vincular este equipo con el backend
+            usando el codigo de seguridad y revisar los ultimos trabajos enviados a impresora.
           </p>
         </div>
         <div id="last-refresh" class="refresh-pill">Actualizando...</div>
@@ -809,6 +964,78 @@ function buildMonitorPage(): string {
           <span>Tiempo activo</span>
           <strong id="uptime">0 s</strong>
         </article>
+        <article class="card">
+          <span>Conexion backend</span>
+          <strong id="backend-link">Sin vincular</strong>
+        </article>
+      </section>
+
+      <section class="panel">
+        <div class="panel__head">
+          <div>
+            <h2>Vinculacion con Gestion al Dia</h2>
+            <p>Ingresa el codigo temporal generado en la app para registrar este equipo.</p>
+          </div>
+          <span id="backend-status" class="status status--queued">Sin vincular</span>
+        </div>
+        <div class="panel__body panel__body--split">
+          <div class="backend-meta">
+            <article class="meta-item">
+              <span>Estado actual</span>
+              <strong id="backend-status-detail">Pendiente de vinculacion</strong>
+            </article>
+            <article class="meta-item">
+              <span>URL backend</span>
+              <strong id="backend-base-url-current">Sin configurar</strong>
+            </article>
+            <article class="meta-item">
+              <span>Agente</span>
+              <strong id="backend-agent-id">Sin registrar</strong>
+            </article>
+            <article class="meta-item">
+              <span>Negocio</span>
+              <strong id="backend-business-id">Sin registrar</strong>
+            </article>
+          </div>
+
+          <form id="backend-register-form" class="form-stack">
+            <label class="field">
+              <span>Codigo de vinculacion</span>
+              <input
+                id="pairing-code"
+                name="pairingCode"
+                inputmode="numeric"
+                autocomplete="one-time-code"
+                placeholder="Ej. 123456"
+                maxlength="12"
+                required
+              />
+            </label>
+
+            <label class="field">
+              <span>URL del backend (opcional)</span>
+              <input
+                id="backend-base-url"
+                name="backendBaseUrl"
+                type="url"
+                placeholder="https://tu-backend"
+              />
+            </label>
+
+            <div class="form-actions">
+              <button id="backend-register-submit" class="button button--primary" type="submit">
+                Vincular agente
+              </button>
+            </div>
+
+            <p class="form-help">
+              Si dejas la URL vacia, el agente usara la direccion predeterminada configurada para
+              Produccion.
+            </p>
+
+            <div id="backend-register-feedback" class="notice" hidden></div>
+          </form>
+        </div>
       </section>
 
       <section class="panel">
@@ -829,8 +1056,20 @@ function buildMonitorPage(): string {
       const pendingJobsNode = document.getElementById('pending-jobs');
       const activeJobNode = document.getElementById('active-job');
       const uptimeNode = document.getElementById('uptime');
+      const backendLinkNode = document.getElementById('backend-link');
+      const backendStatusNode = document.getElementById('backend-status');
+      const backendStatusDetailNode = document.getElementById('backend-status-detail');
+      const backendBaseUrlCurrentNode = document.getElementById('backend-base-url-current');
+      const backendAgentIdNode = document.getElementById('backend-agent-id');
+      const backendBusinessIdNode = document.getElementById('backend-business-id');
+      const backendRegisterForm = document.getElementById('backend-register-form');
+      const pairingCodeInput = document.getElementById('pairing-code');
+      const backendBaseUrlInput = document.getElementById('backend-base-url');
+      const backendRegisterSubmit = document.getElementById('backend-register-submit');
+      const backendRegisterFeedback = document.getElementById('backend-register-feedback');
       const tableContainerNode = document.getElementById('table-container');
       const manualRefreshButton = document.getElementById('manual-refresh');
+      let backendBaseUrlWasEdited = false;
 
       function formatDate(value) {
         try {
@@ -850,6 +1089,45 @@ function buildMonitorPage(): string {
           .replaceAll('>', '&gt;')
           .replaceAll('"', '&quot;')
           .replaceAll("'", '&#39;');
+      }
+
+      function renderBackendStatus(health) {
+        const backend = health && health.backend
+          ? health.backend
+          : {
+              linked: false,
+              baseUrl: null,
+              agentId: null,
+              businessId: null,
+            };
+        const linked = backend.linked === true;
+
+        backendLinkNode.textContent = linked ? 'Vinculado' : 'Pendiente';
+        backendStatusNode.textContent = linked ? 'Vinculado' : 'Sin vincular';
+        backendStatusNode.className = 'status ' + (linked ? 'status--completed' : 'status--queued');
+        backendStatusDetailNode.textContent = linked
+          ? 'El agente ya puede recibir trabajos desde el backend.'
+          : 'Ingresa el codigo temporal para registrar este equipo.';
+        backendBaseUrlCurrentNode.textContent = backend.baseUrl || 'Sin configurar';
+        backendAgentIdNode.textContent = backend.agentId || 'Sin registrar';
+        backendBusinessIdNode.textContent = backend.businessId || 'Sin registrar';
+
+        if (!backendBaseUrlWasEdited && !backendBaseUrlInput.value.trim() && backend.baseUrl) {
+          backendBaseUrlInput.value = backend.baseUrl;
+        }
+      }
+
+      function clearBackendFeedback() {
+        backendRegisterFeedback.hidden = true;
+        backendRegisterFeedback.textContent = '';
+        backendRegisterFeedback.className = 'notice';
+      }
+
+      function showBackendFeedback(message, variant) {
+        backendRegisterFeedback.hidden = false;
+        backendRegisterFeedback.textContent = message;
+        backendRegisterFeedback.className =
+          'notice ' + (variant === 'ok' ? 'notice--ok' : 'notice--error');
       }
 
       function renderJobs(jobs) {
@@ -917,6 +1195,7 @@ function buildMonitorPage(): string {
           const jobsPayload = await jobsResponse.json();
           const jobs = Array.isArray(jobsPayload.jobs) ? jobsPayload.jobs : [];
 
+          renderBackendStatus(health);
           serviceStatusNode.textContent = health.printerModuleReady ? 'Listo' : 'Con incidencias';
           pendingJobsNode.textContent = String(health.queue?.pendingJobs ?? 0);
           activeJobNode.textContent = health.queue?.activeJobLabel || 'Sin trabajo';
@@ -924,6 +1203,10 @@ function buildMonitorPage(): string {
           renderJobs(jobs);
           lastRefreshNode.textContent = 'Ultima actualizacion: ' + formatDate(new Date().toISOString());
         } catch (error) {
+          backendLinkNode.textContent = 'Sin datos';
+          backendStatusNode.textContent = 'Sin datos';
+          backendStatusNode.className = 'status status--failed';
+          backendStatusDetailNode.textContent = 'No fue posible consultar la vinculacion actual.';
           serviceStatusNode.textContent = 'Error';
           tableContainerNode.innerHTML =
             '<div class="empty error-text">' +
@@ -934,6 +1217,59 @@ function buildMonitorPage(): string {
           manualRefreshButton.disabled = false;
         }
       }
+
+      async function registerBackend(event) {
+        event.preventDefault();
+
+        const pairingCode = pairingCodeInput.value.trim();
+        const backendBaseUrl = backendBaseUrlInput.value.trim();
+        clearBackendFeedback();
+
+        if (!pairingCode) {
+          showBackendFeedback('Ingresa el codigo de vinculacion generado en Gestion al Dia.', 'error');
+          pairingCodeInput.focus();
+          return;
+        }
+
+        backendRegisterSubmit.disabled = true;
+
+        try {
+          const response = await fetch('/backend/register', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              pairingCode,
+              backendBaseUrl: backendBaseUrl || null,
+            }),
+          });
+          const payload = await response.json().catch(() => null);
+
+          if (!response.ok || !payload || payload.success !== true) {
+            throw new Error(payload && payload.message ? payload.message : 'No fue posible vincular el agente.');
+          }
+
+          pairingCodeInput.value = '';
+          showBackendFeedback(payload.message, 'ok');
+          await refresh();
+        } catch (error) {
+          showBackendFeedback(
+            error instanceof Error ? error.message : 'No fue posible vincular el agente.',
+            'error',
+          );
+        } finally {
+          backendRegisterSubmit.disabled = false;
+        }
+      }
+
+      backendBaseUrlInput.addEventListener('input', () => {
+        backendBaseUrlWasEdited = true;
+      });
+
+      backendRegisterForm.addEventListener('submit', (event) => {
+        void registerBackend(event);
+      });
 
       manualRefreshButton.addEventListener('click', () => {
         void refresh();

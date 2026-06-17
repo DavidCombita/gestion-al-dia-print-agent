@@ -21,7 +21,7 @@ export function createTray(dependencies: TrayDependencies): Tray {
       enabled: false,
     },
     {
-      label: 'Ver historial de impresiones',
+      label: 'Abrir monitor y configuracion',
       click: async () => {
         await dependencies.onOpenMonitor();
       },
