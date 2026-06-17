@@ -13,7 +13,13 @@ import {
   PrintJobsResponse,
   ReceiptJobPayload,
 } from '../shared/contracts';
-import { createCorsOptions } from '../security/cors.config';
+import {
+  createCorsOptions,
+  isAllowedAgentOrigin,
+  isOfficialWebAgentOrigin,
+  LOCAL_AGENT_ALLOWED_ORIGINS,
+  OFFICIAL_WEB_ALLOWED_ORIGINS,
+} from '../security/cors.config';
 import { PairingTokenService } from '../security/pairing-token.service';
 import { BackendPrintClientService } from '../backend/backend-print-client.service';
 import { sanitizeAppConfig } from '../config/config.schema';
@@ -141,19 +147,31 @@ export class LocalServer {
     this.app.disable('x-powered-by');
     this.app.use(express.json({ limit: '1mb' }));
     this.app.use((request, response, next) => {
+      const origin = request.header('origin');
       const isPrivateNetworkPreflight =
         request.header('access-control-request-private-network')?.toLowerCase() === 'true';
-      const origin = request.header('origin');
-      const allowedOrigins = this.dependencies.configService.getConfig().allowedOrigins;
 
-      if (isPrivateNetworkPreflight && origin && allowedOrigins.includes(origin)) {
+      if (origin) {
+        response.vary('Origin');
+      }
+
+      if (origin && !isAllowedAgentOrigin(origin)) {
+        this.dependencies.logger.warn('Solicitud local bloqueada por CORS.', {
+          origin,
+          method: request.method,
+          path: request.originalUrl,
+          userAgent: request.header('user-agent') ?? 'unknown',
+        });
+      }
+
+      if (isPrivateNetworkPreflight && origin && isOfficialWebAgentOrigin(origin)) {
         response.setHeader('Access-Control-Allow-Private-Network', 'true');
         response.vary('Access-Control-Request-Private-Network');
       }
 
       next();
     });
-    this.app.use(cors(createCorsOptions(this.dependencies.configService)));
+    this.app.use(cors(createCorsOptions()));
     this.app.use((request, response, next) => {
       response.setTimeout(REQUEST_HANDLER_TIMEOUT_MS, () => {
         if (response.headersSent) {
@@ -277,6 +295,19 @@ export class LocalServer {
           success: true,
           message: 'Agente vinculado con el backend de Gestion al Dia.',
           registration,
+        });
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    this.app.post('/backend/sync-printers', async (_request, response, next) => {
+      try {
+        const result = await this.dependencies.backendPrintClient.syncPrintersNow();
+
+        response.json({
+          success: true,
+          message: `Se sincronizaron ${result.synced} impresora(s) con Gestion al Dia.`,
         });
       } catch (error) {
         next(error);
@@ -538,13 +569,21 @@ function isTrustedRecoveryRequest(
     );
   }
 
+  if (request.path === '/backend/sync-printers') {
+    return (
+      request.method === 'POST' &&
+      isLoopbackAddress(request.socket.remoteAddress) &&
+      isTrustedBrowserOrigin(request.header('origin'))
+    );
+  }
+
   if (request.method !== 'GET') {
     return false;
   }
 
-  if (request.path === '/config') {
+  if (request.path === '/config' || request.path === '/printers') {
     const origin = request.header('origin');
-    return Boolean(origin && configService.getConfig().allowedOrigins.includes(origin));
+    return Boolean(origin && isTrustedBrowserOrigin(origin));
   }
 
   if (request.path !== '/jobs') {
@@ -552,6 +591,16 @@ function isTrustedRecoveryRequest(
   }
 
   return isLoopbackAddress(request.socket.remoteAddress);
+}
+
+function isTrustedBrowserOrigin(origin: string | undefined): boolean {
+  if (!origin) {
+    return false;
+  }
+
+  return (
+    LOCAL_AGENT_ALLOWED_ORIGINS.has(origin) || OFFICIAL_WEB_ALLOWED_ORIGINS.has(origin)
+  );
 }
 
 function isLocalAgentOrigin(value: string | undefined): boolean {

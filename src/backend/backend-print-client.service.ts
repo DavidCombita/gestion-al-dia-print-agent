@@ -37,6 +37,11 @@ interface RegisterBackendAgentResponse {
   deviceToken: string;
 }
 
+interface SyncBackendPrintersResponse {
+  accepted: boolean;
+  synced: number;
+}
+
 export interface BackendPrintClientDependencies {
   version: string;
   configService: AppConfigService;
@@ -128,6 +133,38 @@ export class BackendPrintClientService {
     return response;
   }
 
+  async syncPrintersNow(): Promise<SyncBackendPrintersResponse> {
+    const config = this.dependencies.configService.getConfig();
+    const token = config.backendDeviceToken;
+
+    if (!token) {
+      throw new Error('El agente todavia no esta vinculado con Gestion al Dia.');
+    }
+
+    const printers = await this.dependencies.printerService.listPrinters();
+    const response = await this.request<SyncBackendPrintersResponse>(
+      this.resolveBaseUrl(),
+      '/print-agents/printers/sync',
+      {
+        method: 'POST',
+        body: {
+          printers: printers.map((printer) => ({
+            name: printer.name,
+            systemName: printer.name,
+            isDefault: printer.isDefault,
+          })),
+        },
+      },
+      token,
+    );
+
+    this.dependencies.logger.info('Impresoras sincronizadas con el backend.', {
+      synced: response.synced,
+    });
+
+    return response;
+  }
+
   private connectSocket(): void {
     const config = this.dependencies.configService.getConfig();
     const token = config.backendDeviceToken;
@@ -175,25 +212,8 @@ export class BackendPrintClientService {
   }
 
   private async syncPrinters(): Promise<void> {
-    const config = this.dependencies.configService.getConfig();
-    const token = config.backendDeviceToken;
-
-    if (!token) {
-      return;
-    }
-
     try {
-      const printers = await this.dependencies.printerService.listPrinters();
-      await this.request(this.resolveBaseUrl(), '/print-agents/printers/sync', {
-        method: 'POST',
-        body: {
-          printers: printers.map((printer) => ({
-            name: printer.name,
-            systemName: printer.name,
-            isDefault: printer.isDefault,
-          })),
-        },
-      }, token);
+      await this.syncPrintersNow();
     } catch (error) {
       this.dependencies.logger.warn('No fue posible sincronizar impresoras con backend.', error);
     }
@@ -232,6 +252,12 @@ export class BackendPrintClientService {
         token,
       );
 
+      this.dependencies.logger.info('Trabajo de impresion backend reclamado.', {
+        jobId: claimedJob.id,
+        type: claimedJob.type,
+        printerName: claimedJob.printer.systemName || claimedJob.printer.name,
+      });
+
       await this.printClaimedJob(claimedJob, token);
     } catch (error) {
       this.dependencies.logger.warn('No fue posible procesar trabajos pendientes del backend.', error);
@@ -248,6 +274,10 @@ export class BackendPrintClientService {
     const buffer = this.formatJob(job.type, payload);
 
     await this.request(baseUrl, `/print-jobs/${encodeURIComponent(job.id)}/printing`, { method: 'POST' }, token);
+    this.dependencies.logger.info('Trabajo marcado como imprimiendo en backend.', {
+      jobId: job.id,
+      printerName,
+    });
 
     try {
       for (let index = 0; index < copies; index += 1) {
@@ -261,7 +291,17 @@ export class BackendPrintClientService {
       }
 
       await this.request(baseUrl, `/print-jobs/${encodeURIComponent(job.id)}/printed`, { method: 'POST' }, token);
+      this.dependencies.logger.info('Trabajo marcado como impreso en backend.', {
+        jobId: job.id,
+        printerName,
+        copies,
+      });
     } catch (error) {
+      this.dependencies.logger.warn('Trabajo de impresion backend fallido.', {
+        jobId: job.id,
+        printerName,
+        error: error instanceof Error ? error.message : String(error),
+      });
       await this.request(baseUrl, `/print-jobs/${encodeURIComponent(job.id)}/failed`, {
         method: 'POST',
         body: {
