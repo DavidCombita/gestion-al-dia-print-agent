@@ -33,6 +33,10 @@ export interface AgentPrinterConfig {
   paperWidth: PaperWidth;
   pairingToken: string | null;
   allowedOrigins: string[];
+  backendBaseUrl: string | null;
+  backendAgentId: string | null;
+  backendBusinessId: string | null;
+  backendDeviceToken: string | null;
 }
 
 export interface BusinessPrintPayload {

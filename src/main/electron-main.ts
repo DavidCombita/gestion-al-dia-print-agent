@@ -11,9 +11,11 @@ import { PrintHistoryService } from '../printing/print-history.service';
 import { PrinterService } from '../printing/printer.service';
 import { PrintQueueService } from '../printing/print-queue.service';
 import { PairingTokenService } from '../security/pairing-token.service';
+import { BackendPrintClientService } from '../backend/backend-print-client.service';
 
 let tray: Tray | null = null;
 let localServer: LocalServer | null = null;
+let backendPrintClient: BackendPrintClientService | null = null;
 let isQuitting = false;
 let loggerInstance: LoggerService | null = null;
 let restartTimer: ReturnType<typeof setTimeout> | null = null;
@@ -53,6 +55,14 @@ async function bootstrap(): Promise<void> {
   const printerService = new PrinterService(configService, logger);
   const queueService = new PrintQueueService(logger);
   const pairingTokenService = new PairingTokenService();
+  backendPrintClient = new BackendPrintClientService({
+    version: app.getVersion(),
+    configService,
+    logger,
+    printerService,
+    queueService,
+    printHistoryService,
+  });
 
   localServer = new LocalServer({
     version: app.getVersion(),
@@ -63,6 +73,7 @@ async function bootstrap(): Promise<void> {
     printerService,
     printHistoryService,
     pairingTokenService,
+    backendPrintClient,
     onServerUnavailable: (reason, error) => {
       logger.warn('El servidor local reporto una falla y se intentara recuperar.', {
         reason,
@@ -73,6 +84,7 @@ async function bootstrap(): Promise<void> {
   });
 
   await ensureLocalServerStarted();
+  backendPrintClient.start();
   startWatchdog();
 
   tray = createTray({
@@ -90,6 +102,7 @@ async function bootstrap(): Promise<void> {
       isQuitting = true;
       stopWatchdog();
       clearScheduledRestart();
+      backendPrintClient?.stop();
       await localServer?.stop();
       app.quit();
     },
@@ -117,6 +130,7 @@ async function bootstrap(): Promise<void> {
     isQuitting = true;
     stopWatchdog();
     clearScheduledRestart();
+    backendPrintClient?.stop();
     stopAutoUpdater?.();
     stopAutoUpdater = null;
   });

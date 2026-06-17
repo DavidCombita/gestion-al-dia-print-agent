@@ -1,0 +1,347 @@
+import { io, Socket } from 'socket.io-client';
+import { AppConfigService } from '../config/app-config.service';
+import { LoggerService } from '../logs/logger.service';
+import { PrintHistoryService } from '../printing/print-history.service';
+import { PrintQueueService } from '../printing/print-queue.service';
+import { PrinterService } from '../printing/printer.service';
+import { formatInvoice } from '../printing/formatters/invoice.formatter';
+import { formatKitchenOrder } from '../printing/formatters/kitchen-order.formatter';
+import { formatTestTicket } from '../printing/formatters/test-ticket.formatter';
+import { ReceiptJobPayload } from '../shared/contracts';
+
+type BackendPrintJobStatus =
+  | 'PENDING'
+  | 'CLAIMED'
+  | 'PRINTING'
+  | 'PRINTED'
+  | 'FAILED'
+  | 'CANCELLED';
+
+interface BackendPrintJob {
+  id: string;
+  type: 'KITCHEN_TICKET' | 'RECEIPT' | 'SHIFT_REPORT' | 'CASH_CLOSING' | 'TEST_PRINT';
+  status: BackendPrintJobStatus;
+  payload: ReceiptJobPayload;
+  printer: {
+    id: string;
+    name: string;
+    systemName: string;
+    paperWidth: number;
+    copies: number;
+  };
+}
+
+interface RegisterBackendAgentResponse {
+  agentId: string;
+  businessId: string;
+  deviceToken: string;
+}
+
+export interface BackendPrintClientDependencies {
+  version: string;
+  configService: AppConfigService;
+  logger: LoggerService;
+  printerService: PrinterService;
+  queueService: PrintQueueService;
+  printHistoryService: PrintHistoryService;
+}
+
+const DEFAULT_BACKEND_BASE_URL =
+  'https://app-pos-gestion-total-node.purplebush-d0f1177f.centralus.azurecontainerapps.io';
+const HEARTBEAT_INTERVAL_MS = 25_000;
+const POLLING_INTERVAL_MS = 7_000;
+
+export class BackendPrintClientService {
+  private socket: Socket | null = null;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private pollingTimer: ReturnType<typeof setInterval> | null = null;
+  private isProcessing = false;
+
+  constructor(private readonly dependencies: BackendPrintClientDependencies) {}
+
+  start(): void {
+    this.stop();
+    const config = this.dependencies.configService.getConfig();
+
+    if (!config.backendDeviceToken) {
+      this.dependencies.logger.info('Cliente backend de impresion sin vincular.');
+      return;
+    }
+
+    this.connectSocket();
+    void this.sendHeartbeat();
+    void this.syncPrinters();
+    void this.processNextPending();
+
+    this.heartbeatTimer = setInterval(() => {
+      void this.sendHeartbeat();
+    }, HEARTBEAT_INTERVAL_MS);
+    this.heartbeatTimer.unref?.();
+
+    this.pollingTimer = setInterval(() => {
+      void this.processNextPending();
+    }, POLLING_INTERVAL_MS);
+    this.pollingTimer.unref?.();
+  }
+
+  stop(): void {
+    this.socket?.disconnect();
+    this.socket = null;
+
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+
+    if (this.pollingTimer) {
+      clearInterval(this.pollingTimer);
+      this.pollingTimer = null;
+    }
+  }
+
+  async register(pairingCode: string, backendBaseUrl?: string): Promise<RegisterBackendAgentResponse> {
+    const baseUrl = this.resolveBaseUrl(backendBaseUrl);
+    const response = await this.request<RegisterBackendAgentResponse>(
+      baseUrl,
+      '/print-agents/register',
+      {
+        method: 'POST',
+        body: {
+          pairingCode,
+          deviceName: this.resolveDeviceName(),
+          platform: 'WINDOWS',
+          version: this.dependencies.version,
+          machineName: this.resolveDeviceName(),
+          deviceId: this.resolveDeviceName(),
+        },
+      },
+      null,
+    );
+
+    this.dependencies.configService.saveConfig({
+      backendBaseUrl: baseUrl,
+      backendAgentId: response.agentId,
+      backendBusinessId: response.businessId,
+      backendDeviceToken: response.deviceToken,
+    });
+    this.start();
+    return response;
+  }
+
+  private connectSocket(): void {
+    const config = this.dependencies.configService.getConfig();
+    const token = config.backendDeviceToken;
+
+    if (!token) {
+      return;
+    }
+
+    const socketBaseUrl = new URL(this.resolveBaseUrl(config.backendBaseUrl));
+    this.socket = io(`${socketBaseUrl.origin}/print-agents`, {
+      auth: { token },
+      transports: ['websocket', 'polling'],
+      reconnection: true,
+      reconnectionDelay: 2_000,
+      reconnectionDelayMax: 30_000,
+    });
+
+    this.socket.on('connect', () => {
+      this.dependencies.logger.info('Conectado al WebSocket de impresion backend.');
+    });
+    this.socket.on('print-job.created', () => {
+      void this.processNextPending();
+    });
+    this.socket.on('disconnect', (reason) => {
+      this.dependencies.logger.warn('WebSocket de impresion desconectado.', { reason });
+    });
+  }
+
+  private async sendHeartbeat(): Promise<void> {
+    const config = this.dependencies.configService.getConfig();
+    const token = config.backendDeviceToken;
+
+    if (!token) {
+      return;
+    }
+
+    try {
+      await this.request(this.resolveBaseUrl(config.backendBaseUrl), '/print-agents/heartbeat', {
+        method: 'POST',
+        body: { version: this.dependencies.version },
+      }, token);
+    } catch (error) {
+      this.dependencies.logger.warn('No fue posible enviar heartbeat al backend.', error);
+    }
+  }
+
+  private async syncPrinters(): Promise<void> {
+    const config = this.dependencies.configService.getConfig();
+    const token = config.backendDeviceToken;
+
+    if (!token) {
+      return;
+    }
+
+    try {
+      const printers = await this.dependencies.printerService.listPrinters();
+      await this.request(this.resolveBaseUrl(config.backendBaseUrl), '/print-agents/printers/sync', {
+        method: 'POST',
+        body: {
+          printers: printers.map((printer) => ({
+            name: printer.name,
+            systemName: printer.name,
+            isDefault: printer.isDefault,
+          })),
+        },
+      }, token);
+    } catch (error) {
+      this.dependencies.logger.warn('No fue posible sincronizar impresoras con backend.', error);
+    }
+  }
+
+  private async processNextPending(): Promise<void> {
+    if (this.isProcessing) {
+      return;
+    }
+
+    const config = this.dependencies.configService.getConfig();
+    const token = config.backendDeviceToken;
+
+    if (!token) {
+      return;
+    }
+
+    this.isProcessing = true;
+
+    try {
+      const job = await this.request<BackendPrintJob | null>(
+        this.resolveBaseUrl(config.backendBaseUrl),
+        '/print-jobs/next-pending',
+        { method: 'GET' },
+        token,
+      );
+
+      if (!job) {
+        return;
+      }
+
+      const claimedJob = await this.request<BackendPrintJob>(
+        this.resolveBaseUrl(config.backendBaseUrl),
+        `/print-jobs/${encodeURIComponent(job.id)}/claim`,
+        { method: 'POST' },
+        token,
+      );
+
+      await this.printClaimedJob(claimedJob, token);
+    } catch (error) {
+      this.dependencies.logger.warn('No fue posible procesar trabajos pendientes del backend.', error);
+    } finally {
+      this.isProcessing = false;
+    }
+  }
+
+  private async printClaimedJob(job: BackendPrintJob, token: string): Promise<void> {
+    const baseUrl = this.resolveBaseUrl(this.dependencies.configService.getConfig().backendBaseUrl);
+    const printerName = job.printer.systemName || job.printer.name;
+    const payload = this.normalizePayload(job);
+    const copies = Math.max(1, Math.min(5, Math.trunc(payload.options?.copies ?? job.printer.copies ?? 1)));
+    const buffer = this.formatJob(job.type, payload);
+
+    await this.request(baseUrl, `/print-jobs/${encodeURIComponent(job.id)}/printing`, { method: 'POST' }, token);
+
+    try {
+      for (let index = 0; index < copies; index += 1) {
+        const label = copies > 1 ? `${job.type}-${job.id}-${index + 1}` : `${job.type}-${job.id}`;
+        const historyId = this.dependencies.printHistoryService.recordQueued(label, printerName);
+        await this.dependencies.queueService.enqueue(label, async () => {
+          this.dependencies.printHistoryService.markProcessing(historyId);
+          await this.dependencies.printerService.printRaw(printerName, label, buffer);
+          this.dependencies.printHistoryService.markCompleted(historyId);
+        });
+      }
+
+      await this.request(baseUrl, `/print-jobs/${encodeURIComponent(job.id)}/printed`, { method: 'POST' }, token);
+    } catch (error) {
+      await this.request(baseUrl, `/print-jobs/${encodeURIComponent(job.id)}/failed`, {
+        method: 'POST',
+        body: {
+          errorCode: this.mapPrintError(error),
+          errorMessage: error instanceof Error ? error.message : String(error),
+        },
+      }, token).catch(() => undefined);
+    }
+  }
+
+  private normalizePayload(job: BackendPrintJob): ReceiptJobPayload {
+    return {
+      ...job.payload,
+      options: {
+        ...job.payload.options,
+        paperWidth:
+          job.payload.options?.paperWidth ?? (job.printer.paperWidth === 58 ? '58mm' : '80mm'),
+        copies: job.payload.options?.copies ?? job.printer.copies,
+      },
+    };
+  }
+
+  private formatJob(type: BackendPrintJob['type'], payload: ReceiptJobPayload): Buffer {
+    if (type === 'KITCHEN_TICKET') {
+      return formatKitchenOrder(payload);
+    }
+
+    if (type === 'TEST_PRINT') {
+      return formatTestTicket(payload);
+    }
+
+    return formatInvoice(payload);
+  }
+
+  private async request<T>(
+    baseUrl: string,
+    path: string,
+    options: { method: 'GET' | 'POST'; body?: unknown },
+    token: string | null,
+  ): Promise<T> {
+    const response = await fetch(new URL(path, baseUrl), {
+      method: options.method,
+      headers: {
+        Accept: 'application/json',
+        ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: options.body ? JSON.stringify(options.body) : undefined,
+    });
+
+    if (!response.ok) {
+      throw new Error(`Backend respondió ${response.status}`);
+    }
+
+    return (await response.json()) as T;
+  }
+
+  private resolveBaseUrl(value: string | null | undefined): string {
+    return value?.trim() || DEFAULT_BACKEND_BASE_URL;
+  }
+
+  private resolveDeviceName(): string {
+    return process.env.COMPUTERNAME || process.env.HOSTNAME || 'Gestion al Dia Print Agent';
+  }
+
+  private mapPrintError(error: unknown): string {
+    const message = error instanceof Error ? error.message : String(error);
+
+    if (/not found|no encontrada|no existe/i.test(message)) {
+      return 'PRINTER_NOT_FOUND';
+    }
+
+    if (/timeout|tiempo/i.test(message)) {
+      return 'PRINT_TIMEOUT';
+    }
+
+    if (/offline|desconect/i.test(message)) {
+      return 'PRINTER_OFFLINE';
+    }
+
+    return 'UNKNOWN_ERROR';
+  }
+}

@@ -10,6 +10,10 @@ export interface AppConfig {
   paperWidth: PaperWidth;
   pairingToken: string | null;
   allowedOrigins: string[];
+  backendBaseUrl: string | null;
+  backendAgentId: string | null;
+  backendBusinessId: string | null;
+  backendDeviceToken: string | null;
 }
 
 export const DEFAULT_ALLOWED_ORIGINS = [
@@ -29,6 +33,10 @@ export const defaultAppConfig: AppConfig = {
   paperWidth: '80mm',
   pairingToken: null,
   allowedOrigins: DEFAULT_ALLOWED_ORIGINS,
+  backendBaseUrl: null,
+  backendAgentId: null,
+  backendBusinessId: null,
+  backendDeviceToken: null,
 };
 
 export function sanitizeAppConfig(value: unknown): AppConfig {
@@ -44,6 +52,10 @@ export function sanitizeAppConfig(value: unknown): AppConfig {
     paperWidth: normalizePaperWidth(record.paperWidth),
     pairingToken: normalizeNullableString(record.pairingToken),
     allowedOrigins: normalizeAllowedOrigins(record.allowedOrigins),
+    backendBaseUrl: normalizeNullableString(record.backendBaseUrl),
+    backendAgentId: normalizeNullableString(record.backendAgentId),
+    backendBusinessId: normalizeNullableString(record.backendBusinessId),
+    backendDeviceToken: normalizeNullableString(record.backendDeviceToken),
   };
 }
 

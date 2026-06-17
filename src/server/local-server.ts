@@ -15,6 +15,7 @@ import {
 } from '../shared/contracts';
 import { createCorsOptions } from '../security/cors.config';
 import { PairingTokenService } from '../security/pairing-token.service';
+import { BackendPrintClientService } from '../backend/backend-print-client.service';
 import { sanitizeAppConfig } from '../config/config.schema';
 import { formatInvoice } from '../printing/formatters/invoice.formatter';
 import { formatKitchenOrder } from '../printing/formatters/kitchen-order.formatter';
@@ -37,6 +38,7 @@ export interface LocalServerDependencies {
   printerService: PrinterService;
   printHistoryService: PrintHistoryService;
   pairingTokenService: PairingTokenService;
+  backendPrintClient: BackendPrintClientService;
   onServerUnavailable?: (reason: 'server-error' | 'server-close', error?: unknown) => void;
 }
 
@@ -250,6 +252,30 @@ export class LocalServer {
       try {
         await shell.showItemInFolder(this.dependencies.configService.getConfigPath());
         this.sendSuccess(response, 'Se abrio la carpeta de configuracion del agente.');
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    this.app.post('/backend/register', async (request, response, next) => {
+      try {
+        const pairingCode = normalizeNullableString(request.body?.pairingCode, null);
+        const backendBaseUrl = normalizeNullableString(request.body?.backendBaseUrl, null);
+
+        if (!pairingCode) {
+          throw new Error('Ingresa el codigo de vinculacion generado en Gestion al Dia.');
+        }
+
+        const registration = await this.dependencies.backendPrintClient.register(
+          pairingCode,
+          backendBaseUrl ?? undefined,
+        );
+
+        response.json({
+          success: true,
+          message: 'Agente vinculado con el backend de Gestion al Dia.',
+          registration,
+        });
       } catch (error) {
         next(error);
       }
