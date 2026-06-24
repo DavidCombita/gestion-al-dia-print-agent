@@ -2,6 +2,8 @@
 
 Agente local para Windows que permite a la app web de Gestion al Dia imprimir directamente hacia impresoras termicas instaladas en Windows por medio de `http://127.0.0.1:3088`, sin abrir el dialogo del navegador.
 
+![alt text](docs/image-arq-gen.png)
+
 ## Por que Electron para este caso
 
 - `Electron + Node.js`: mejor equilibrio para un `.exe` instalable, arranque con Windows, bandeja del sistema, servidor local embebido y acceso a librerias de impresion.
@@ -22,6 +24,16 @@ Agente local para Windows que permite a la app web de Gestion al Dia imprimir di
 - `POST /print/kitchen-order`
 
 Todos escuchan solo en `127.0.0.1:3088`.
+
+![alt text](docs/image-print-web.png)
+
+Print desde conexión segura.
+
+![alt text](docs/image-print-agent.png)
+
+Flujo general
+
+![alt text](docs/image-flujo-principal.png)
 
 ## Seguridad
 
