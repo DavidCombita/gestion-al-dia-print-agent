@@ -62,6 +62,12 @@ async function bootstrap(): Promise<void> {
     printerService,
     queueService,
     printHistoryService,
+    notify: (title, content) => {
+      tray?.displayBalloon?.({
+        title,
+        content,
+      });
+    },
   });
 
   localServer = new LocalServer({

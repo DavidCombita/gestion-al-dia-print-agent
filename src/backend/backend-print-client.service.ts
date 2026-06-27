@@ -42,6 +42,13 @@ interface SyncBackendPrintersResponse {
   synced: number;
 }
 
+class BackendAgentAuthExpiredError extends Error {
+  constructor(readonly statusCode: 401 | 403) {
+    super(`Backend respondió ${statusCode}`);
+    this.name = 'BackendAgentAuthExpiredError';
+  }
+}
+
 export interface BackendPrintClientDependencies {
   version: string;
   configService: AppConfigService;
@@ -49,6 +56,7 @@ export interface BackendPrintClientDependencies {
   printerService: PrinterService;
   queueService: PrintQueueService;
   printHistoryService: PrintHistoryService;
+  notify?: (title: string, content: string) => void;
 }
 
 const DEFAULT_BACKEND_BASE_URL =
@@ -61,6 +69,7 @@ export class BackendPrintClientService {
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private pollingTimer: ReturnType<typeof setInterval> | null = null;
   private isProcessing = false;
+  private authExpiredHandled = false;
 
   constructor(private readonly dependencies: BackendPrintClientDependencies) {}
 
@@ -72,6 +81,8 @@ export class BackendPrintClientService {
       this.dependencies.logger.info('Cliente backend de impresion sin vincular.');
       return;
     }
+
+    this.authExpiredHandled = false;
 
     this.connectSocket();
     void this.sendHeartbeat();
@@ -129,6 +140,7 @@ export class BackendPrintClientService {
       backendBusinessId: response.businessId,
       backendDeviceToken: response.deviceToken,
     });
+    this.authExpiredHandled = false;
     this.start();
     return response;
   }
@@ -185,6 +197,11 @@ export class BackendPrintClientService {
     this.socket.on('connect', () => {
       this.dependencies.logger.info('Conectado al WebSocket de impresion backend.');
     });
+    this.socket.on('connect_error', (error) => {
+      this.dependencies.logger.warn('Fallo la autenticacion o conexion del WebSocket de impresion.', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
     this.socket.on('print-job.created', () => {
       void this.processNextPending();
     });
@@ -207,6 +224,10 @@ export class BackendPrintClientService {
         body: { version: this.dependencies.version },
       }, token);
     } catch (error) {
+      if (error instanceof BackendAgentAuthExpiredError) {
+        return;
+      }
+
       this.dependencies.logger.warn('No fue posible enviar heartbeat al backend.', error);
     }
   }
@@ -215,6 +236,10 @@ export class BackendPrintClientService {
     try {
       await this.syncPrintersNow();
     } catch (error) {
+      if (error instanceof BackendAgentAuthExpiredError) {
+        return;
+      }
+
       this.dependencies.logger.warn('No fue posible sincronizar impresoras con backend.', error);
     }
   }
@@ -260,6 +285,10 @@ export class BackendPrintClientService {
 
       await this.printClaimedJob(claimedJob, token);
     } catch (error) {
+      if (error instanceof BackendAgentAuthExpiredError) {
+        return;
+      }
+
       this.dependencies.logger.warn('No fue posible procesar trabajos pendientes del backend.', error);
     } finally {
       this.isProcessing = false;
@@ -297,6 +326,10 @@ export class BackendPrintClientService {
         copies,
       });
     } catch (error) {
+      if (error instanceof BackendAgentAuthExpiredError) {
+        throw error;
+      }
+
       this.dependencies.logger.warn('Trabajo de impresion backend fallido.', {
         jobId: job.id,
         printerName,
@@ -353,10 +386,34 @@ export class BackendPrintClientService {
     });
 
     if (!response.ok) {
+      if (response.status === 401 || response.status === 403) {
+        this.handleBackendAuthenticationExpired(response.status);
+        throw new BackendAgentAuthExpiredError(response.status);
+      }
+
       throw new Error(`Backend respondió ${response.status}`);
     }
 
     return (await response.json()) as T;
+  }
+
+  private handleBackendAuthenticationExpired(statusCode: 401 | 403): void {
+    if (this.authExpiredHandled) {
+      return;
+    }
+
+    this.authExpiredHandled = true;
+    this.stop();
+    this.dependencies.configService.saveConfig({
+      backendDeviceToken: null,
+    });
+    this.dependencies.logger.warn('Sesion del agente expirada o revocada. Se requiere nuevo pairing.', {
+      statusCode,
+    });
+    this.dependencies.notify?.(
+      'Gestion al Dia Print Agent',
+      'Sesion expirada. Realiza el pairing nuevamente.',
+    );
   }
 
   private resolveBaseUrl(): string {
