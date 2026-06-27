@@ -33,6 +33,7 @@
     "@types/node": "^20.17.19",
     "electron": "^36.4.0",
     "electron-builder": "^26.0.12",
+    "socket.io": "^4.8.3",
     "typescript": "^5.9.3"
   },
   "build": {

@@ -135,7 +135,6 @@ export class BackendPrintClientService {
     );
 
     this.dependencies.configService.saveConfig({
-      backendBaseUrl: null,
       backendAgentId: response.agentId,
       backendBusinessId: response.businessId,
       backendDeviceToken: response.deviceToken,
@@ -417,7 +416,8 @@ export class BackendPrintClientService {
   }
 
   private resolveBaseUrl(): string {
-    return DEFAULT_BACKEND_BASE_URL;
+    const configuredBaseUrl = this.dependencies.configService.getConfig().backendBaseUrl;
+    return configuredBaseUrl || DEFAULT_BACKEND_BASE_URL;
   }
 
   private resolveDeviceName(): string {

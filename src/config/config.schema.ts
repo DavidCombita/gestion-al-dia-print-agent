@@ -52,7 +52,7 @@ export function sanitizeAppConfig(value: unknown): AppConfig {
     paperWidth: normalizePaperWidth(record.paperWidth),
     pairingToken: normalizeNullableString(record.pairingToken),
     allowedOrigins: normalizeAllowedOrigins(record.allowedOrigins),
-    backendBaseUrl: null,
+    backendBaseUrl: normalizeBackendBaseUrl(record.backendBaseUrl),
     backendAgentId: normalizeNullableString(record.backendAgentId),
     backendBusinessId: normalizeNullableString(record.backendBusinessId),
     backendDeviceToken: normalizeNullableString(record.backendDeviceToken),
@@ -108,5 +108,17 @@ function normalizeOrigin(value: string): string | null {
     return new URL(trimmedValue).origin;
   } catch {
     return trimmedValue.replace(/\/+$/, '');
+  }
+}
+
+function normalizeBackendBaseUrl(value: unknown): string | null {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    return null;
+  }
+
+  try {
+    return new URL(value.trim()).origin;
+  } catch {
+    return value.trim().replace(/\/+$/, '');
   }
 }
