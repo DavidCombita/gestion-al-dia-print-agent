@@ -42,6 +42,18 @@ interface SyncBackendPrintersResponse {
   synced: number;
 }
 
+interface BackendRuntimeErrorSnapshot {
+  at: string;
+  message: string;
+}
+
+export interface BackendRuntimeStatusSnapshot {
+  connected: boolean;
+  lastContactAt?: string;
+  lastError?: BackendRuntimeErrorSnapshot;
+  lastDisconnectReason?: string;
+}
+
 class BackendAgentAuthExpiredError extends Error {
   constructor(readonly statusCode: 401 | 403) {
     super(`Backend respondió ${statusCode}`);
@@ -63,6 +75,7 @@ const DEFAULT_BACKEND_BASE_URL =
   'https://app-pos-gestion-total-node.purplebush-d0f1177f.centralus.azurecontainerapps.io';
 const HEARTBEAT_INTERVAL_MS = 25_000;
 const POLLING_INTERVAL_MS = 7_000;
+const BACKEND_REQUEST_TIMEOUT_MS = 20_000;
 
 export class BackendPrintClientService {
   private socket: Socket | null = null;
@@ -70,6 +83,10 @@ export class BackendPrintClientService {
   private pollingTimer: ReturnType<typeof setInterval> | null = null;
   private isProcessing = false;
   private authExpiredHandled = false;
+  private isSocketConnected = false;
+  private lastSuccessfulContactAt: string | null = null;
+  private lastErrorSnapshot: BackendRuntimeErrorSnapshot | null = null;
+  private lastDisconnectReason: string | null = null;
 
   constructor(private readonly dependencies: BackendPrintClientDependencies) {}
 
@@ -103,6 +120,7 @@ export class BackendPrintClientService {
   stop(): void {
     this.socket?.disconnect();
     this.socket = null;
+    this.isSocketConnected = false;
 
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
@@ -172,6 +190,7 @@ export class BackendPrintClientService {
     this.dependencies.logger.info('Impresoras sincronizadas con el backend.', {
       synced: response.synced,
     });
+    this.recordSuccessfulContact();
 
     return response;
   }
@@ -194,9 +213,19 @@ export class BackendPrintClientService {
     });
 
     this.socket.on('connect', () => {
+      this.isSocketConnected = true;
+      this.lastDisconnectReason = null;
+      this.recordSuccessfulContact();
       this.dependencies.logger.info('Conectado al WebSocket de impresion backend.');
+      void this.sendHeartbeat();
+      void this.syncPrinters();
+      void this.processNextPending();
     });
     this.socket.on('connect_error', (error) => {
+      this.isSocketConnected = false;
+      this.recordBackendError(
+        error instanceof Error ? error.message : String(error),
+      );
       this.dependencies.logger.warn('Fallo la autenticacion o conexion del WebSocket de impresion.', {
         error: error instanceof Error ? error.message : String(error),
       });
@@ -205,6 +234,8 @@ export class BackendPrintClientService {
       void this.processNextPending();
     });
     this.socket.on('disconnect', (reason) => {
+      this.isSocketConnected = false;
+      this.lastDisconnectReason = reason;
       this.dependencies.logger.warn('WebSocket de impresion desconectado.', { reason });
     });
   }
@@ -222,11 +253,15 @@ export class BackendPrintClientService {
         method: 'POST',
         body: { version: this.dependencies.version },
       }, token);
+      this.recordSuccessfulContact();
     } catch (error) {
       if (error instanceof BackendAgentAuthExpiredError) {
         return;
       }
 
+      this.recordBackendError(
+        error instanceof Error ? error.message : String(error),
+      );
       this.dependencies.logger.warn('No fue posible enviar heartbeat al backend.', error);
     }
   }
@@ -239,6 +274,9 @@ export class BackendPrintClientService {
         return;
       }
 
+      this.recordBackendError(
+        error instanceof Error ? error.message : String(error),
+      );
       this.dependencies.logger.warn('No fue posible sincronizar impresoras con backend.', error);
     }
   }
@@ -258,43 +296,51 @@ export class BackendPrintClientService {
     this.isProcessing = true;
 
     try {
-      const job = await this.request<BackendPrintJob | null>(
-        this.resolveBaseUrl(),
-        '/print-jobs/next-pending',
-        { method: 'GET' },
-        token,
-      );
+      while (true) {
+        const job = await this.request<BackendPrintJob | null>(
+          this.resolveBaseUrl(),
+          '/print-jobs/next-pending',
+          { method: 'GET' },
+          token,
+        );
 
-      if (!job) {
-        return;
+        if (!job) {
+          return;
+        }
+
+        const claimedJob = await this.request<BackendPrintJob>(
+          this.resolveBaseUrl(),
+          `/print-jobs/${encodeURIComponent(job.id)}/claim`,
+          { method: 'POST' },
+          token,
+        );
+
+        this.dependencies.logger.info('Trabajo de impresion backend reclamado.', {
+          jobId: claimedJob.id,
+          type: claimedJob.type,
+          printerName: claimedJob.printer.systemName || claimedJob.printer.name,
+        });
+
+        const printed = await this.printClaimedJob(claimedJob, token);
+        if (!printed) {
+          return;
+        }
       }
-
-      const claimedJob = await this.request<BackendPrintJob>(
-        this.resolveBaseUrl(),
-        `/print-jobs/${encodeURIComponent(job.id)}/claim`,
-        { method: 'POST' },
-        token,
-      );
-
-      this.dependencies.logger.info('Trabajo de impresion backend reclamado.', {
-        jobId: claimedJob.id,
-        type: claimedJob.type,
-        printerName: claimedJob.printer.systemName || claimedJob.printer.name,
-      });
-
-      await this.printClaimedJob(claimedJob, token);
     } catch (error) {
       if (error instanceof BackendAgentAuthExpiredError) {
         return;
       }
 
+      this.recordBackendError(
+        error instanceof Error ? error.message : String(error),
+      );
       this.dependencies.logger.warn('No fue posible procesar trabajos pendientes del backend.', error);
     } finally {
       this.isProcessing = false;
     }
   }
 
-  private async printClaimedJob(job: BackendPrintJob, token: string): Promise<void> {
+  private async printClaimedJob(job: BackendPrintJob, token: string): Promise<boolean> {
     const baseUrl = this.resolveBaseUrl();
     const printerName = job.printer.systemName || job.printer.name;
     const payload = this.normalizePayload(job);
@@ -324,6 +370,8 @@ export class BackendPrintClientService {
         printerName,
         copies,
       });
+      this.recordSuccessfulContact();
+      return true;
     } catch (error) {
       if (error instanceof BackendAgentAuthExpiredError) {
         throw error;
@@ -334,6 +382,9 @@ export class BackendPrintClientService {
         printerName,
         error: error instanceof Error ? error.message : String(error),
       });
+      this.recordBackendError(
+        error instanceof Error ? error.message : String(error),
+      );
       await this.request(baseUrl, `/print-jobs/${encodeURIComponent(job.id)}/failed`, {
         method: 'POST',
         body: {
@@ -341,6 +392,7 @@ export class BackendPrintClientService {
           errorMessage: error instanceof Error ? error.message : String(error),
         },
       }, token).catch(() => undefined);
+      return false;
     }
   }
 
@@ -374,15 +426,35 @@ export class BackendPrintClientService {
     options: { method: 'GET' | 'POST'; body?: unknown },
     token: string | null,
   ): Promise<T> {
-    const response = await fetch(new URL(path, baseUrl), {
-      method: options.method,
-      headers: {
-        Accept: 'application/json',
-        ...(options.body ? { 'Content-Type': 'application/json' } : {}),
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
-      body: options.body ? JSON.stringify(options.body) : undefined,
-    });
+    const abortController = new AbortController();
+    const timeoutId = setTimeout(() => {
+      abortController.abort();
+    }, BACKEND_REQUEST_TIMEOUT_MS);
+
+    let response: Response;
+
+    try {
+      response = await fetch(new URL(path, baseUrl), {
+        method: options.method,
+        headers: {
+          Accept: 'application/json',
+          ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: options.body ? JSON.stringify(options.body) : undefined,
+        signal: abortController.signal,
+      });
+    } catch (error) {
+      if (abortController.signal.aborted) {
+        throw new Error(
+          `La solicitud al backend excedio ${BACKEND_REQUEST_TIMEOUT_MS / 1000}s en ${path}.`,
+        );
+      }
+
+      throw error;
+    } finally {
+      clearTimeout(timeoutId);
+    }
 
     if (!response.ok) {
       if (response.status === 401 || response.status === 403) {
@@ -393,6 +465,7 @@ export class BackendPrintClientService {
       throw new Error(`Backend respondió ${response.status}`);
     }
 
+    this.recordSuccessfulContact();
     return (await response.json()) as T;
   }
 
@@ -440,5 +513,27 @@ export class BackendPrintClientService {
     }
 
     return 'UNKNOWN_ERROR';
+  }
+
+  getStatusSnapshot(): BackendRuntimeStatusSnapshot {
+    return {
+      connected: this.isSocketConnected,
+      lastContactAt: this.lastSuccessfulContactAt ?? undefined,
+      lastError: this.lastErrorSnapshot ?? undefined,
+      lastDisconnectReason: this.lastDisconnectReason ?? undefined,
+    };
+  }
+
+  private recordSuccessfulContact(): void {
+    this.lastSuccessfulContactAt = new Date().toISOString();
+    this.lastErrorSnapshot = null;
+  }
+
+  private recordBackendError(message: string): void {
+    const normalizedMessage = message.trim();
+    this.lastErrorSnapshot = {
+      at: new Date().toISOString(),
+      message: normalizedMessage || 'Ocurrio un error de comunicacion con el backend.',
+    };
   }
 }

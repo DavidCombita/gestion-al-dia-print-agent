@@ -194,6 +194,7 @@ export class LocalServer {
     this.app.get('/health', async (_request, response) => {
       const config = this.dependencies.configService.getConfig();
       const printerModuleStatus = await this.dependencies.printerService.getModuleStatus();
+      const backendRuntimeStatus = this.dependencies.backendPrintClient.getStatusSnapshot();
       const payload: AgentHealthResponse = {
         status: 'ok',
         app: 'Gestion Al Dia Print Agent',
@@ -208,6 +209,10 @@ export class LocalServer {
           baseUrl: config.backendBaseUrl,
           agentId: config.backendAgentId,
           businessId: config.backendBusinessId,
+          connected: backendRuntimeStatus.connected,
+          lastContactAt: backendRuntimeStatus.lastContactAt,
+          lastDisconnectReason: backendRuntimeStatus.lastDisconnectReason,
+          lastError: backendRuntimeStatus.lastError,
         },
         uptimeSeconds: Math.max(
           0,
@@ -1041,6 +1046,14 @@ function buildMonitorPage(): string {
               <span>Negocio</span>
               <strong id="backend-business-id">Sin registrar</strong>
             </article>
+            <article class="meta-item">
+              <span>Ultimo contacto</span>
+              <strong id="backend-last-contact">Sin datos</strong>
+            </article>
+            <article class="meta-item">
+              <span>Ultimo error backend</span>
+              <strong id="backend-last-error">Sin errores registrados</strong>
+            </article>
           </div>
 
           <form id="backend-register-form" class="form-stack">
@@ -1092,6 +1105,8 @@ function buildMonitorPage(): string {
       const backendBaseUrlCurrentNode = document.getElementById('backend-base-url-current');
       const backendAgentIdNode = document.getElementById('backend-agent-id');
       const backendBusinessIdNode = document.getElementById('backend-business-id');
+      const backendLastContactNode = document.getElementById('backend-last-contact');
+      const backendLastErrorNode = document.getElementById('backend-last-error');
       const backendRegisterForm = document.getElementById('backend-register-form');
       const pairingCodeInput = document.getElementById('pairing-code');
       const backendRegisterSubmit = document.getElementById('backend-register-submit');
@@ -1127,18 +1142,50 @@ function buildMonitorPage(): string {
               baseUrl: null,
               agentId: null,
               businessId: null,
+              connected: false,
+              lastContactAt: null,
+              lastDisconnectReason: null,
+              lastError: null,
             };
         const linked = backend.linked === true;
+        const connected = backend.connected === true;
+        const hasError = Boolean(backend.lastError && backend.lastError.message);
 
-        backendLinkNode.textContent = linked ? 'Vinculado' : 'Pendiente';
-        backendStatusNode.textContent = linked ? 'Vinculado' : 'Sin vincular';
-        backendStatusNode.className = 'status ' + (linked ? 'status--completed' : 'status--queued');
-        backendStatusDetailNode.textContent = linked
-          ? 'El agente ya puede recibir trabajos desde el backend.'
-          : 'Ingresa el codigo temporal para registrar este equipo.';
+        backendLinkNode.textContent = !linked
+          ? 'Sin vincular'
+          : connected
+            ? 'Conectado'
+            : 'Desconectado';
+        backendStatusNode.textContent = !linked
+          ? 'Sin vincular'
+          : connected
+            ? 'Conectado'
+            : hasError
+              ? 'Con error'
+              : 'Desconectado';
+        backendStatusNode.className =
+          'status ' +
+          (!linked
+            ? 'status--queued'
+            : connected
+              ? 'status--completed'
+              : 'status--failed');
+        backendStatusDetailNode.textContent = !linked
+          ? 'Ingresa el codigo temporal para registrar este equipo.'
+          : connected
+            ? 'El agente esta conectado al backend y puede recibir trabajos.'
+            : backend.lastDisconnectReason
+              ? 'Ultima desconexion: ' + backend.lastDisconnectReason
+              : 'El agente esta vinculado, pero sin conexion activa al backend.';
         backendBaseUrlCurrentNode.textContent = backend.baseUrl || 'URL oficial del agente';
         backendAgentIdNode.textContent = backend.agentId || 'Sin registrar';
         backendBusinessIdNode.textContent = backend.businessId || 'Sin registrar';
+        backendLastContactNode.textContent = backend.lastContactAt
+          ? formatDate(backend.lastContactAt)
+          : 'Sin datos';
+        backendLastErrorNode.textContent = backend.lastError && backend.lastError.message
+          ? backend.lastError.message + (backend.lastError.at ? ' (' + formatDate(backend.lastError.at) + ')' : '')
+          : 'Sin errores registrados';
       }
 
       function clearBackendFeedback() {

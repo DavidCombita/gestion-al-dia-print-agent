@@ -14,6 +14,13 @@ export interface AgentHealthResponse {
     baseUrl: string | null;
     agentId: string | null;
     businessId: string | null;
+    connected?: boolean;
+    lastContactAt?: string;
+    lastDisconnectReason?: string;
+    lastError?: {
+      at: string;
+      message: string;
+    };
   };
   uptimeSeconds?: number;
   queue?: {
