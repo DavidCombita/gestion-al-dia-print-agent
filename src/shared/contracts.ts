@@ -1,8 +1,8 @@
-export type PaperWidth = "58mm" | "80mm";
+export type PaperWidth = '58mm' | '80mm';
 
 export interface AgentHealthResponse {
-  status: "ok";
-  app: "Gestion Al Dia Print Agent";
+  status: 'ok';
+  app: 'Gestion Al Dia Print Agent';
   version: string;
   platform: NodeJS.Platform;
   pairingRequired: boolean;
@@ -33,7 +33,7 @@ export interface AgentHealthResponse {
 export interface PrinterDescriptor {
   name: string;
   isDefault: boolean;
-  status: "ready" | "offline" | "unknown";
+  status: 'ready' | 'offline' | 'unknown';
 }
 
 export interface AgentPrinterConfig {
@@ -107,32 +107,6 @@ export interface ReceiptJobPayload {
   options?: PrintOptionsPayload;
 }
 
-export interface ThermalReportRow {
-  label: string;
-  value?: string;
-  details?: string[];
-}
-
-export interface ThermalReportSection {
-  title: string;
-  rows: ThermalReportRow[];
-}
-
-export interface ThermalReportJobPayload {
-  version: 1;
-  reportKind: "INVENTORY" | "SHIFT";
-  title: string;
-  reference?: string;
-  business: BusinessPrintPayload;
-  generatedAt: string;
-  generatedBy: string;
-  metadata: ThermalReportRow[];
-  sections: ThermalReportSection[];
-  options?: PrintOptionsPayload;
-}
-
-export type BackendPrintPayload = ReceiptJobPayload | ThermalReportJobPayload;
-
 export interface ConfigResponse {
   config: AgentPrinterConfig;
 }
@@ -146,7 +120,7 @@ export interface AgentMutationResponse {
   message: string;
 }
 
-export type PrintJobStatus = "queued" | "processing" | "completed" | "failed";
+export type PrintJobStatus = 'queued' | 'processing' | 'completed' | 'failed';
 
 export interface PrintJobRecord {
   id: string;
