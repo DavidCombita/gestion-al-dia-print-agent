@@ -53,12 +53,6 @@ interface SyncBackendPrintersResponse {
   synced: number;
 }
 
-interface BackendRequestOptions {
-  method: "GET" | "POST";
-  body?: unknown;
-  responseBody?: "required" | "optional";
-}
-
 interface BackendRuntimeErrorSnapshot {
   at: string;
   message: string;
@@ -283,7 +277,6 @@ export class BackendPrintClientService {
         {
           method: "POST",
           body: { version: this.dependencies.version },
-          responseBody: "optional",
         },
         token,
       );
@@ -340,7 +333,7 @@ export class BackendPrintClientService {
         const job = await this.request<BackendPrintJob | null>(
           this.resolveBaseUrl(),
           "/print-jobs/next-pending",
-          { method: "GET", responseBody: "optional" },
+          { method: "GET" },
           token,
         );
 
@@ -408,7 +401,7 @@ export class BackendPrintClientService {
       await this.request(
         baseUrl,
         `/print-jobs/${encodeURIComponent(job.id)}/printing`,
-        { method: "POST", responseBody: "optional" },
+        { method: "POST" },
         token,
       );
       this.dependencies.logger.info(
@@ -442,7 +435,7 @@ export class BackendPrintClientService {
       await this.request(
         baseUrl,
         `/print-jobs/${encodeURIComponent(job.id)}/printed`,
-        { method: "POST", responseBody: "optional" },
+        { method: "POST" },
         token,
       );
       this.dependencies.logger.info(
@@ -478,7 +471,6 @@ export class BackendPrintClientService {
             errorMessage:
               error instanceof Error ? error.message : String(error),
           },
-          responseBody: "optional",
         },
         token,
       ).catch(() => undefined);
@@ -527,7 +519,7 @@ export class BackendPrintClientService {
   private async request<T>(
     baseUrl: string,
     path: string,
-    options: BackendRequestOptions,
+    options: { method: "GET" | "POST"; body?: unknown },
     token: string | null,
   ): Promise<T> {
     const abortController = new AbortController();
@@ -570,41 +562,7 @@ export class BackendPrintClientService {
     }
 
     this.recordSuccessfulContact();
-    const responseBody = await response.text();
-
-    if (!responseBody.trim()) {
-      if (options.responseBody === "optional") {
-        return null as T;
-      }
-
-      throw new Error(
-        `El backend respondio ${response.status} sin contenido JSON en ${path}.`,
-      );
-    }
-
-    try {
-      return JSON.parse(responseBody) as T;
-    } catch (error) {
-      const responseContext = {
-        path,
-        statusCode: response.status,
-        contentType: response.headers.get("content-type") ?? "unknown",
-        responseBytes: Buffer.byteLength(responseBody, "utf8"),
-      };
-
-      if (options.responseBody === "optional") {
-        this.dependencies.logger.warn(
-          "El backend confirmo la operacion, pero devolvio un cuerpo que no es JSON valido.",
-          responseContext,
-        );
-        return null as T;
-      }
-
-      const parseDetail = error instanceof Error ? ` ${error.message}` : "";
-      throw new Error(
-        `El backend devolvio JSON invalido en ${path} (HTTP ${response.status}, ${responseContext.responseBytes} bytes).${parseDetail}`,
-      );
-    }
+    return (await response.json()) as T;
   }
 
   private handleBackendAuthenticationExpired(statusCode: 401 | 403): void {

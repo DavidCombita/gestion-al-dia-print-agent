@@ -29,9 +29,6 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Test
-        run: npm test
-
       - name: Resolve release metadata
         id: release_meta
         uses: actions/github-script@v7

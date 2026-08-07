@@ -1,6 +1,6 @@
 {
   "name": "gestion-al-dia-print-agent",
-  "version": "2.0.6",
+  "version": "2.0.5",
   "description": "Agente local de impresion termica para Gestion al Dia en Windows.",
   "main": "dist/main/electron-main.js",
   "author": "Codex",
@@ -17,7 +17,6 @@
     "build": "tsc -p tsconfig.json",
     "dist:win": "npm run build && electron-builder --win nsis",
     "release:win": "npm run build && electron-builder --win nsis --publish never",
-    "test": "npm run build && node --test tests/*.test.cjs",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
