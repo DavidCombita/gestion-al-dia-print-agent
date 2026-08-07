@@ -105,11 +105,13 @@ test('restarts background connectivity after a successful re-pairing', async () 
   global.fetch = async () => ({
     ok: true,
     status: 200,
-    json: async () => ({
-      agentId: 'agent-2',
-      businessId: 'business-2',
-      deviceToken: 'new-device-token',
-    }),
+    headers: { get: () => 'application/json' },
+    text: async () =>
+      JSON.stringify({
+        agentId: 'agent-2',
+        businessId: 'business-2',
+        deviceToken: 'new-device-token',
+      }),
   });
 
   try {
@@ -133,6 +135,146 @@ test('restarts background connectivity after a successful re-pairing', async () 
       },
     ]);
     assert.equal(startCalls, 1);
+  } finally {
+    global.fetch = restoreFetch;
+  }
+});
+
+test('treats an empty successful polling response as no pending print job', async () => {
+  const restoreFetch = global.fetch;
+  const warnings = [];
+
+  global.fetch = async () => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => null },
+    text: async () => '',
+  });
+
+  try {
+    const service = createService({ savedConfigs: [], notifications: [], warnings });
+    const result = await service.request(
+      'https://example.com/',
+      '/print-jobs/next-pending',
+      { method: 'GET', responseBody: 'optional' },
+      'device-token',
+    );
+
+    assert.equal(result, null);
+    assert.deepEqual(warnings, []);
+  } finally {
+    global.fetch = restoreFetch;
+  }
+});
+
+test('keeps required backend responses strict when the body is empty', async () => {
+  const restoreFetch = global.fetch;
+
+  global.fetch = async () => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => null },
+    text: async () => '   ',
+  });
+
+  try {
+    const service = createService({ savedConfigs: [], notifications: [], warnings: [] });
+
+    await assert.rejects(
+      service.request(
+        'https://example.com/',
+        '/print-agents/register',
+        { method: 'POST' },
+        null,
+      ),
+      /respondio 200 sin contenido JSON en \/print-agents\/register/,
+    );
+  } finally {
+    global.fetch = restoreFetch;
+  }
+});
+
+test('does not fail an acknowledged operation when its optional response contains invalid JSON', async () => {
+  const restoreFetch = global.fetch;
+  const warnings = [];
+
+  global.fetch = async () => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => 'application/json' },
+    text: async () => '{"status":"PRINTED"',
+  });
+
+  try {
+    const service = createService({ savedConfigs: [], notifications: [], warnings });
+    const result = await service.request(
+      'https://example.com/',
+      '/print-jobs/job-1/printed',
+      { method: 'POST', responseBody: 'optional' },
+      'device-token',
+    );
+
+    assert.equal(result, null);
+    assert.equal(warnings.length, 1);
+    assert.equal(warnings[0].path, '/print-jobs/job-1/printed');
+    assert.equal(warnings[0].statusCode, 200);
+    assert.equal(warnings[0].contentType, 'application/json');
+    assert.equal(warnings[0].responseBytes, 19);
+  } finally {
+    global.fetch = restoreFetch;
+  }
+});
+
+test('does not resend a physical print when printing acknowledgements have empty bodies', async () => {
+  const restoreFetch = global.fetch;
+  const requestedPaths = [];
+  let physicalPrints = 0;
+
+  global.fetch = async (url) => {
+    requestedPaths.push(new URL(url).pathname);
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      text: async () => '',
+    };
+  };
+
+  try {
+    const service = createService({ savedConfigs: [], notifications: [], warnings: [] });
+    service.dependencies.printerService.printRaw = async () => {
+      physicalPrints += 1;
+    };
+
+    const printed = await service.printClaimedJob(
+      {
+        id: 'job-empty-ack',
+        type: 'RECEIPT',
+        status: 'CLAIMED',
+        printer: {
+          id: 'printer-1',
+          name: 'POS-80C',
+          systemName: 'POS-80C',
+          paperWidth: 80,
+          copies: 1,
+        },
+        payload: {
+          business: { name: 'Patio bolivar', nit: '4151730' },
+          order: { id: '717', createdAt: '2026-08-07T01:48:04.153Z' },
+          items: [{ name: 'Producto', quantity: 1, unitPrice: 1000, total: 1000 }],
+          totals: { subtotal: 1000, tax: 0, discount: 0, total: 1000 },
+          options: { copies: 1, paperWidth: '80mm' },
+        },
+      },
+      'device-token',
+    );
+
+    assert.equal(printed, true);
+    assert.equal(physicalPrints, 1);
+    assert.deepEqual(requestedPaths, [
+      '/print-jobs/job-empty-ack/printing',
+      '/print-jobs/job-empty-ack/printed',
+    ]);
   } finally {
     global.fetch = restoreFetch;
   }

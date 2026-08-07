@@ -115,9 +115,11 @@ La base actual del agente ya es compatible con el objetivo correcto para Windows
 Comandos de ejemplo:
 
 ```bash
-git tag v1.0.1
-git push origin v1.0.1
+git tag v2.0.6
+git push origin v2.0.6
 ```
+
+Las notas y el plan de verificacion de la version actual estan en [`docs/release-2.0.6.md`](docs/release-2.0.6.md).
 
 ### Advertencia importante sobre repo privado
 
