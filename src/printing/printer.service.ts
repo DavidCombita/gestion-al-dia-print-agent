@@ -1,3 +1,4 @@
+import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { AppConfigService } from '../config/app-config.service';
@@ -38,6 +39,15 @@ type NativePrinterModule = {
     options: Record<string, unknown>,
   ) => unknown;
 };
+
+export interface PrinterSpoolJobSnapshot {
+  id?: number;
+  documentName: string;
+  status?: string;
+  submittedAt?: string;
+  sizeBytes?: number;
+  totalPages?: number;
+}
 
 export class PrinterService {
   private printerModule: PrinterModule | null = null;
@@ -121,6 +131,40 @@ export class PrinterService {
         reject(createPrintError(error, targetPrinterName, documentName));
       }
     });
+  }
+
+  async findSpoolJob(
+    targetPrinterName: string,
+    documentName: string,
+  ): Promise<PrinterSpoolJobSnapshot | null> {
+    if (process.platform !== 'win32') {
+      return null;
+    }
+
+    try {
+      const rawOutput = await execFileText('powershell.exe', [
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        buildFindSpoolJobScript(targetPrinterName),
+      ]);
+      const spoolJobs = parseSpoolJobs(rawOutput);
+
+      return (
+        spoolJobs.find((job) => job.documentName === documentName) ?? null
+      );
+    } catch (error) {
+      this.logger.warn('No fue posible consultar la cola de impresion de Windows.', {
+        targetPrinterName,
+        documentName,
+        error:
+          error instanceof Error && error.message.trim()
+            ? error.message.trim()
+            : String(error),
+      });
+      return null;
+    }
   }
 
   private resolveDefaultPrinterName(printerModule: PrinterModule): string | null {
@@ -374,6 +418,98 @@ function modulePathExists(modulePath: string): boolean {
   }
 
   return false;
+}
+
+function buildFindSpoolJobScript(targetPrinterName: string): string {
+  const encodedPrinterName = Buffer.from(targetPrinterName, 'utf8').toString('base64');
+
+  return [
+    `$printerName = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('${encodedPrinterName}'))`,
+    '$jobs = @(Get-PrintJob -PrinterName $printerName -ErrorAction Stop | Select-Object Id,DocumentName,JobStatus,SubmittedTime,Size,TotalPages)',
+    '$jobs | ConvertTo-Json -Compress',
+  ].join('; ');
+}
+
+function execFileText(command: string, args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      command,
+      args,
+      {
+        timeout: 5_000,
+        windowsHide: true,
+      },
+      (error, stdout, stderr) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+
+        if (stderr.trim()) {
+          reject(new Error(stderr.trim()));
+          return;
+        }
+
+        resolve(stdout);
+      },
+    );
+  });
+}
+
+function parseSpoolJobs(rawOutput: string): PrinterSpoolJobSnapshot[] {
+  const normalizedOutput = rawOutput.trim();
+
+  if (!normalizedOutput) {
+    return [];
+  }
+
+  const parsedValue = JSON.parse(normalizedOutput);
+  const values = Array.isArray(parsedValue) ? parsedValue : [parsedValue];
+
+  return values
+    .map(normalizeSpoolJob)
+    .filter((job): job is PrinterSpoolJobSnapshot => job !== null);
+}
+
+function normalizeSpoolJob(value: unknown): PrinterSpoolJobSnapshot | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  const documentName = readString(record.DocumentName);
+
+  if (!documentName) {
+    return null;
+  }
+
+  return {
+    id: readNumber(record.Id),
+    documentName,
+    status: readString(record.JobStatus),
+    submittedAt: readString(record.SubmittedTime),
+    sizeBytes: readNumber(record.Size),
+    totalPages: readNumber(record.TotalPages),
+  };
+}
+
+function readString(value: unknown): string | undefined {
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
+      .filter(Boolean)
+      .join(', ') || undefined;
+  }
+
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function readNumber(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+
+  return undefined;
 }
 
 function createPrintError(

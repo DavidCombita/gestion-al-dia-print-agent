@@ -99,6 +99,56 @@ test('clears the local token, stops background work, and notifies on backend 403
   }
 });
 
+test('accepts successful empty backend responses without JSON parse failures', async () => {
+  const restoreFetch = global.fetch;
+
+  global.fetch = async () => ({
+    ok: true,
+    status: 204,
+    text: async () => '',
+  });
+
+  try {
+    const service = createService({ savedConfigs: [], notifications: [], warnings: [] });
+    const result = await service.request(
+      'https://example.com/',
+      '/print-jobs/next-pending',
+      { method: 'GET' },
+      'device-token',
+    );
+
+    assert.equal(result, undefined);
+  } finally {
+    global.fetch = restoreFetch;
+  }
+});
+
+test('reports non-json backend responses with a controlled message', async () => {
+  const restoreFetch = global.fetch;
+
+  global.fetch = async () => ({
+    ok: true,
+    status: 200,
+    text: async () => '<html>not json</html>',
+  });
+
+  try {
+    const service = createService({ savedConfigs: [], notifications: [], warnings: [] });
+
+    await assert.rejects(
+      service.request(
+        'https://example.com/',
+        '/print-jobs/next-pending',
+        { method: 'GET' },
+        'device-token',
+      ),
+      /cuerpo no JSON en \/print-jobs\/next-pending/,
+    );
+  } finally {
+    global.fetch = restoreFetch;
+  }
+});
+
 test('restarts background connectivity after a successful re-pairing', async () => {
   const restoreFetch = global.fetch;
   const savedConfigs = [];
@@ -335,6 +385,101 @@ test('rejects payloads that do not match the selected print strategy', () => {
   );
 });
 
+test('does not report failed after Windows accepts a raw job but backend printed ack fails', async () => {
+  const restoreFetch = global.fetch;
+  const requests = [];
+
+  global.fetch = async (url, options = {}) => {
+    const requestUrl = new URL(url);
+    const body = options.body ? JSON.parse(options.body) : null;
+    requests.push({
+      path: requestUrl.pathname,
+      method: options.method,
+      body,
+    });
+
+    if (requestUrl.pathname.endsWith('/printed')) {
+      return {
+        ok: false,
+        status: 500,
+        json: async () => ({ message: 'ack failed' }),
+      };
+    }
+
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ accepted: true }),
+    };
+  };
+
+  try {
+    const service = createService({
+      savedConfigs: [],
+      notifications: [],
+      warnings: [],
+      configOverrides: {
+        backendBaseUrl: 'http://127.0.0.1:4321',
+      },
+    });
+    const result = await service.printClaimedJob(
+      {
+        id: 'job-1',
+        type: 'KITCHEN_TICKET',
+        status: 'CLAIMED',
+        payload: {
+          business: {
+            name: 'Restaurante Demo',
+            nit: '900123456',
+          },
+          order: {
+            id: '42-7',
+            tableName: '01',
+            waiterName: 'Ana',
+            createdAt: '2026-08-08T10:00:00.000Z',
+          },
+          items: [
+            {
+              name: 'Hamburguesa clasica',
+              quantity: 1,
+              total: 15000,
+            },
+          ],
+          options: {
+            paperWidth: '80mm',
+            copies: 1,
+            cutPaper: true,
+            openCashDrawer: false,
+            showTotals: false,
+            showItemPrices: false,
+          },
+        },
+        printer: {
+          id: 'printer-1',
+          name: 'POS-80C',
+          systemName: 'POS-80C',
+          paperWidth: 80,
+          copies: 1,
+        },
+      },
+      'device-token',
+    );
+
+    const failedRequests = requests.filter((request) => request.path.endsWith('/failed'));
+    const eventStages = requests
+      .filter((request) => request.path.endsWith('/events'))
+      .map((request) => request.body.stage);
+
+    assert.equal(result, false);
+    assert.equal(failedRequests.length, 0);
+    assert.equal(requests.filter((request) => request.path.endsWith('/printed')).length, 3);
+    assert.equal(eventStages.includes('SPOOL_ACCEPTED'), true);
+    assert.equal(eventStages.includes('BACKEND_ACK_FAILED'), true);
+  } finally {
+    global.fetch = restoreFetch;
+  }
+});
+
 test('uses the configured backend base URL for registration, revocation handling, and socket reconnection', async () => {
   const notifications = [];
   const savedConfigs = [];
@@ -442,6 +587,7 @@ function createService({ savedConfigs, notifications, warnings, configOverrides 
       recordQueued: () => 'history-1',
       markProcessing() {},
       markCompleted() {},
+      markFailed() {},
     },
     notify(title, content) {
       notifications.push({ title, content });
