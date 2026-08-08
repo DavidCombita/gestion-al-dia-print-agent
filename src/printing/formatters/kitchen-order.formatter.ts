@@ -5,5 +5,6 @@ export function formatKitchenOrder(payload: ReceiptJobPayload): Buffer {
   return buildEscPosDocument(payload, {
     title: 'Comanda cocina',
     showTotals: false,
+    showItemPrices: payload.options?.showItemPrices ?? false,
   });
 }

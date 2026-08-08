@@ -4,10 +4,11 @@ import { LoggerService } from '../logs/logger.service';
 import { PrintHistoryService } from '../printing/print-history.service';
 import { PrintQueueService } from '../printing/print-queue.service';
 import { PrinterService } from '../printing/printer.service';
-import { formatInvoice } from '../printing/formatters/invoice.formatter';
-import { formatKitchenOrder } from '../printing/formatters/kitchen-order.formatter';
-import { formatTestTicket } from '../printing/formatters/test-ticket.formatter';
-import { ReceiptJobPayload } from '../shared/contracts';
+import { formatBackendPrintJob } from '../printing/strategies/print-format-strategy.registry';
+import {
+  BackendPrintPayload,
+  BackendPrintJobType,
+} from '../shared/contracts';
 
 type BackendPrintJobStatus =
   | 'PENDING'
@@ -19,9 +20,9 @@ type BackendPrintJobStatus =
 
 interface BackendPrintJob {
   id: string;
-  type: 'KITCHEN_TICKET' | 'RECEIPT' | 'SHIFT_REPORT' | 'CASH_CLOSING' | 'TEST_PRINT';
+  type: BackendPrintJobType;
   status: BackendPrintJobStatus;
-  payload: ReceiptJobPayload;
+  payload: BackendPrintPayload;
   printer: {
     id: string;
     name: string;
@@ -396,7 +397,7 @@ export class BackendPrintClientService {
     }
   }
 
-  private normalizePayload(job: BackendPrintJob): ReceiptJobPayload {
+  private normalizePayload(job: BackendPrintJob): BackendPrintPayload {
     return {
       ...job.payload,
       options: {
@@ -408,16 +409,8 @@ export class BackendPrintClientService {
     };
   }
 
-  private formatJob(type: BackendPrintJob['type'], payload: ReceiptJobPayload): Buffer {
-    if (type === 'KITCHEN_TICKET') {
-      return formatKitchenOrder(payload);
-    }
-
-    if (type === 'TEST_PRINT') {
-      return formatTestTicket(payload);
-    }
-
-    return formatInvoice(payload);
+  private formatJob(type: BackendPrintJob['type'], payload: BackendPrintPayload): Buffer {
+    return formatBackendPrintJob(type, payload);
   }
 
   private async request<T>(

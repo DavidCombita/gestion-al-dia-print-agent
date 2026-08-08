@@ -94,6 +94,8 @@ export interface PrintOptionsPayload {
   paperWidth?: PaperWidth;
   cutPaper?: boolean;
   openCashDrawer?: boolean;
+  showTotals?: boolean;
+  showItemPrices?: boolean;
 }
 
 export interface ReceiptJobPayload {
@@ -106,6 +108,40 @@ export interface ReceiptJobPayload {
   paymentBreakdown?: PaymentBreakdownPrintPayload[];
   options?: PrintOptionsPayload;
 }
+
+export interface ThermalReportRow {
+  label: string;
+  value?: string;
+  details?: string[];
+}
+
+export interface ThermalReportSection {
+  title: string;
+  rows: ThermalReportRow[];
+}
+
+export interface ThermalReportJobPayload {
+  version: 1;
+  reportKind: 'INVENTORY' | 'SHIFT';
+  title: string;
+  reference?: string;
+  business: BusinessPrintPayload;
+  generatedAt: string;
+  generatedBy: string;
+  metadata: ThermalReportRow[];
+  sections: ThermalReportSection[];
+  options?: PrintOptionsPayload;
+}
+
+export type BackendPrintPayload = ReceiptJobPayload | ThermalReportJobPayload;
+
+export type BackendPrintJobType =
+  | 'KITCHEN_TICKET'
+  | 'RECEIPT'
+  | 'INVENTORY_REPORT'
+  | 'SHIFT_REPORT'
+  | 'CASH_CLOSING'
+  | 'TEST_PRINT';
 
 export interface ConfigResponse {
   config: AgentPrinterConfig;

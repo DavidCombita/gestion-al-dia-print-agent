@@ -4,6 +4,8 @@ const test = require('node:test');
 const { Server } = require('socket.io');
 const { BackendPrintClientService } = require('../dist/backend/backend-print-client.service.js');
 const { sanitizeAppConfig } = require('../dist/config/config.schema.js');
+const { formatInvoice } = require('../dist/printing/formatters/invoice.formatter.js');
+const { formatKitchenOrder } = require('../dist/printing/formatters/kitchen-order.formatter.js');
 
 test('preserves a custom backend base URL in the local config schema', () => {
   const parsedConfig = sanitizeAppConfig({
@@ -170,6 +172,167 @@ test('reconnects on startup when a persisted device token still exists after res
   assert.equal(heartbeatCalls, 1);
   assert.equal(syncCalls, 1);
   assert.equal(processCalls, 1);
+});
+
+test('formats kitchen orders without item prices when showItemPrices is false', () => {
+  const buffer = formatKitchenOrder({
+    business: {
+      name: 'Restaurante Demo',
+      nit: '900123456',
+    },
+    order: {
+      id: '42-7',
+      tableName: '01',
+      waiterName: 'Ana',
+      createdAt: '2026-08-08T10:00:00.000Z',
+    },
+    items: [
+      {
+        name: 'Hamburguesa clasica',
+        quantity: 2,
+        unitPrice: 15000,
+        total: 30000,
+        notes: ['Sin cebolla'],
+      },
+    ],
+    totals: {
+      subtotal: 30000,
+      tax: 0,
+      discount: 0,
+      tip: 0,
+      total: 30000,
+    },
+    options: {
+      paperWidth: '80mm',
+      cutPaper: true,
+      openCashDrawer: false,
+      showTotals: false,
+      showItemPrices: false,
+    },
+  });
+  const text = buffer.toString('latin1');
+
+  assert.equal(text.includes('$'), false);
+  assert.equal(text.includes('Hamburguesa clasica'), true);
+  assert.equal(text.includes('Sin cebolla'), true);
+});
+
+test('formats invoices with tip and payment breakdown', () => {
+  const buffer = formatInvoice({
+    business: {
+      name: 'Restaurante Demo',
+      nit: '900123456',
+    },
+    order: {
+      id: '42',
+      tableName: '01',
+      waiterName: 'Ana',
+      createdAt: '2026-08-08T10:00:00.000Z',
+    },
+    items: [
+      {
+        name: 'Hamburguesa clasica',
+        quantity: 1,
+        unitPrice: 15000,
+        total: 15000,
+      },
+    ],
+    totals: {
+      subtotal: 15000,
+      tax: 0,
+      discount: 0,
+      tip: 2000,
+      total: 17000,
+    },
+    paymentBreakdown: [{ label: 'Efectivo', amount: 17000 }],
+    options: {
+      paperWidth: '80mm',
+      cutPaper: true,
+      openCashDrawer: false,
+    },
+  });
+  const text = buffer.toString('latin1');
+
+  assert.equal(text.includes('Propina'), true);
+  assert.equal(text.includes('METODOS DE PAGO'), true);
+  assert.equal(text.includes('Efectivo'), true);
+});
+
+test('routes thermal inventory and shift reports without requiring receipt fields', () => {
+  const service = createService({ savedConfigs: [], notifications: [], warnings: [] });
+  const payload = {
+    version: 1,
+    reportKind: 'SHIFT',
+    title: 'Cierre de Turno',
+    reference: 'shift-1',
+    business: {
+      name: 'Restaurante Demo',
+      nit: '900123456',
+    },
+    generatedAt: '2026-08-08T10:00:00.000Z',
+    generatedBy: 'Ana',
+    metadata: [{ label: 'Estado', value: 'Cerrado' }],
+    sections: [
+      {
+        title: 'Resumen',
+        rows: [{ label: 'Ventas', value: '$ 10.000' }],
+      },
+    ],
+    options: {
+      paperWidth: '80mm',
+      cutPaper: true,
+      openCashDrawer: false,
+    },
+  };
+
+  const shiftBuffer = service.formatJob('SHIFT_REPORT', payload);
+  const inventoryBuffer = service.formatJob('INVENTORY_REPORT', {
+    ...payload,
+    reportKind: 'INVENTORY',
+    title: 'Gestion de Inventario',
+  });
+
+  assert.equal(Buffer.isBuffer(shiftBuffer), true);
+  assert.equal(shiftBuffer.length > 100, true);
+  assert.equal(Buffer.isBuffer(inventoryBuffer), true);
+  assert.equal(inventoryBuffer.length > 100, true);
+});
+
+test('rejects payloads that do not match the selected print strategy', () => {
+  const service = createService({ savedConfigs: [], notifications: [], warnings: [] });
+  const thermalPayload = {
+    version: 1,
+    reportKind: 'INVENTORY',
+    title: 'Gestion de Inventario',
+    reference: 'inventory-1',
+    business: {
+      name: 'Restaurante Demo',
+      nit: '900123456',
+    },
+    generatedAt: '2026-08-08T10:00:00.000Z',
+    generatedBy: 'Ana',
+    metadata: [{ label: 'Productos activos', value: '12' }],
+    sections: [
+      {
+        title: 'Conteo',
+        rows: [{ label: 'Cafe', value: '10 unidades' }],
+      },
+    ],
+    options: {
+      paperWidth: '80mm',
+      cutPaper: true,
+      openCashDrawer: false,
+    },
+  };
+
+  assert.throws(
+    () => service.formatJob('SHIFT_REPORT', thermalPayload),
+    /SHIFT_REPORT.*shift/i,
+  );
+  assert.throws(
+    () => service.formatJob('RECEIPT', thermalPayload),
+    /RECEIPT.*factura/i,
+  );
 });
 
 test('uses the configured backend base URL for registration, revocation handling, and socket reconnection', async () => {

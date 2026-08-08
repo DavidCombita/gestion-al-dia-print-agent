@@ -1,4 +1,8 @@
-import { ReceiptJobPayload } from '../shared/contracts';
+import {
+  ReceiptJobPayload,
+  ThermalReportJobPayload,
+  ThermalReportRow,
+} from '../shared/contracts';
 
 const ESC = 0x1b;
 const GS = 0x1d;
@@ -7,6 +11,7 @@ const CODE_PAGE_CP850 = 0x02;
 export interface EscPosDocumentOptions {
   title: string;
   showTotals: boolean;
+  showItemPrices?: boolean;
   showBusinessContactAtFooter?: boolean;
 }
 
@@ -18,6 +23,8 @@ export function buildEscPosDocument(
 ): Buffer {
   const paperWidth = payload.options?.paperWidth ?? '80mm';
   const columns = paperWidth === '58mm' ? 32 : 48;
+  const shouldShowItemPrices =
+    options.showItemPrices ?? payload.options?.showItemPrices ?? true;
   const chunks: Buffer[] = [
     command(ESC, 0x40),
     command(ESC, 0x74, CODE_PAGE_CP850),
@@ -64,7 +71,7 @@ export function buildEscPosDocument(
   chunks.push(blankLine());
 
   for (const item of payload.items) {
-    chunks.push(...buildItemLines(item, columns));
+    chunks.push(...buildItemLines(item, columns, shouldShowItemPrices));
   }
 
   chunks.push(line(divider(columns)));
@@ -110,16 +117,153 @@ export function buildEscPosDocument(
   return Buffer.concat(chunks);
 }
 
+export function buildEscPosReport(payload: ThermalReportJobPayload): Buffer {
+  const paperWidth = payload.options?.paperWidth ?? '80mm';
+  const columns = paperWidth === '58mm' ? 32 : 48;
+  const chunks: Buffer[] = [
+    command(ESC, 0x40),
+    command(ESC, 0x74, CODE_PAGE_CP850),
+    align('center'),
+    command(ESC, 0x45, 0x01),
+    command(GS, 0x21, 0x11),
+    ...wrapText(payload.title.toUpperCase(), columns).map(line),
+    command(GS, 0x21, 0x00),
+    ...wrapText(payload.business.name, columns).map(line),
+    command(ESC, 0x45, 0x00),
+  ];
+
+  if (payload.business.nit?.trim()) {
+    chunks.push(line(`NIT ${payload.business.nit.trim()}`));
+  }
+
+  chunks.push(blankLine());
+  chunks.push(align('left'));
+  chunks.push(line(divider(columns)));
+  chunks.push(
+    ...buildReportField('Generado', formatDate(payload.generatedAt), columns),
+  );
+  chunks.push(...buildReportField('Responsable', payload.generatedBy, columns));
+
+  if (payload.reference?.trim()) {
+    chunks.push(...buildReportField('Referencia', payload.reference, columns));
+  }
+
+  for (const row of payload.metadata) {
+    chunks.push(...buildThermalReportRow(row, columns, false));
+  }
+
+  chunks.push(line(divider(columns)));
+
+  for (const section of payload.sections) {
+    chunks.push(blankLine());
+    chunks.push(command(ESC, 0x45, 0x01));
+    chunks.push(...wrapText(section.title.toUpperCase(), columns).map(line));
+    chunks.push(command(ESC, 0x45, 0x00));
+    chunks.push(
+      line('-'.repeat(Math.min(columns, Math.max(12, section.title.length)))),
+    );
+
+    for (const row of section.rows) {
+      chunks.push(...buildThermalReportRow(row, columns, true));
+    }
+  }
+
+  chunks.push(blankLine());
+  chunks.push(line(divider(columns)));
+  chunks.push(align('center'));
+  chunks.push(line('Gestion al Dia'));
+
+  if (payload.business.address?.trim()) {
+    chunks.push(...wrapText(payload.business.address, columns).map(line));
+  }
+
+  if (payload.business.phone?.trim()) {
+    chunks.push(...wrapText(payload.business.phone, columns).map(line));
+  }
+
+  chunks.push(feed(5));
+
+  if (payload.options?.openCashDrawer) {
+    chunks.push(command(ESC, 0x70, 0x00, 0x19, 0xfa));
+  }
+
+  if (payload.options?.cutPaper !== false) {
+    chunks.push(command(GS, 0x56, 0x41, 0x03));
+  }
+
+  return Buffer.concat(chunks);
+}
+
+function buildThermalReportRow(
+  row: ThermalReportRow,
+  columns: number,
+  addSpacing: boolean,
+): Buffer[] {
+  const chunks: Buffer[] = [];
+  const label = normalizePrintableText(row.label).trim();
+  const value = normalizePrintableText(row.value ?? '').trim();
+
+  if (value && label.length + value.length + 1 <= columns) {
+    chunks.push(
+      line(
+        padColumns(
+          label,
+          value,
+          Math.max(1, columns - value.length - 1),
+          value.length + 1,
+        ),
+      ),
+    );
+  } else {
+    chunks.push(...wrapText(label, columns).map(line));
+
+    if (value) {
+      chunks.push(
+        ...wrapText(value, Math.max(8, columns - 2)).map((text) =>
+          line(`  ${text}`),
+        ),
+      );
+    }
+  }
+
+  for (const detail of row.details ?? []) {
+    chunks.push(
+      ...wrapText(`  ${detail}`, Math.max(8, columns - 2)).map((text) =>
+        line(`  ${text.trimStart()}`),
+      ),
+    );
+  }
+
+  if (addSpacing) {
+    chunks.push(blankLine());
+  }
+
+  return chunks;
+}
+
+function buildReportField(
+  label: string,
+  value: string,
+  columns: number,
+): Buffer[] {
+  return buildThermalReportRow({ label: `${label}:`, value }, columns, false);
+}
+
 function buildItemLines(
   item: ReceiptJobPayload['items'][number],
   columns: number,
+  shouldShowItemPrices: boolean,
 ): Buffer[] {
   const chunks: Buffer[] = [];
   const quantityLabel = formatQuantity(item.quantity);
   const amountText =
-    typeof item.total === 'number' ? formatCurrency(item.total) : '';
+    shouldShowItemPrices && typeof item.total === 'number'
+      ? formatCurrency(item.total)
+      : '';
   const prefix = `${quantityLabel} x `;
-  const detailWidth = Math.max(12, columns - Math.max(10, amountText.length + 2));
+  const detailWidth = shouldShowItemPrices
+    ? Math.max(12, columns - Math.max(10, amountText.length + 2))
+    : columns;
   const itemLines = wrapText(`${prefix}${normalizePrintableText(item.name)}`, detailWidth);
 
   itemLines.forEach((currentLine, index) => {
