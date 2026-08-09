@@ -469,16 +469,16 @@ export class LocalServer {
         const printerName = resolveConfiguredPrinter(config.invoicePrinterName, 'facturas');
         const result = await this.dependencies.printOrchestrator.execute({
           source: 'LOCAL',
-          jobType: 'TEST_PRINT',
+          jobType: 'RECEIPT',
           payload,
           printerName,
-          documentName: 'ticket-de-prueba',
+          documentName: 'factura-prueba-local',
           copies: 1,
           paperWidth: config.paperWidth,
         });
         response.json({
           success: result.status === 'SPOOL_COMPLETED',
-          message: describePrintResult('Ticket de prueba', result.status),
+          message: describePrintResult('Factura de prueba', result.status),
           result,
         });
       } catch (error) {
@@ -643,6 +643,7 @@ export class LocalServer {
 
 function buildTestPayload(paperWidth: '58mm' | '80mm'): ReceiptJobPayload {
   return {
+    title: 'FACTURA DE PRUEBA',
     business: {
       name: 'Gestion al Dia',
       nit: '900123456-7',
@@ -760,6 +761,7 @@ function isTrustedRecoveryRequest(
 
   if (request.method !== 'GET') {
     const localOperationalPath =
+      request.path === '/print/test' ||
       request.path.startsWith('/printing/diagnostics/') ||
       request.path.startsWith('/printing/jobs/') ||
       request.path === '/printing/printers/profile' ||
@@ -883,6 +885,19 @@ function buildMonitorPage(): string {
         line-height: 1.5;
       }
 
+      .hero-actions {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+
+      .test-print-feedback {
+        margin: -8px 0 24px;
+        white-space: pre-wrap;
+      }
+
       .refresh-pill {
         border: 1px solid var(--border);
         background: rgba(255, 255, 255, 0.82);
@@ -948,6 +963,39 @@ function buildMonitorPage(): string {
       .panel__head p {
         margin: 0;
         color: var(--muted);
+      }
+
+      .collapsible-panel > summary {
+        list-style: none;
+        cursor: pointer;
+        user-select: none;
+      }
+
+      .collapsible-panel > summary::-webkit-details-marker {
+        display: none;
+      }
+
+      .collapsible-panel:not([open]) > summary {
+        border-bottom: 0;
+      }
+
+      .summary-status {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+
+      .collapse-indicator {
+        width: 10px;
+        height: 10px;
+        border-right: 2px solid var(--muted);
+        border-bottom: 2px solid var(--muted);
+        transform: rotate(45deg) translateY(-2px);
+        transition: transform 160ms ease;
+      }
+
+      .collapsible-panel[open] .collapse-indicator {
+        transform: rotate(225deg) translate(-2px, -2px);
       }
 
       .panel__body {
@@ -1245,6 +1293,15 @@ function buildMonitorPage(): string {
           align-items: flex-start;
         }
 
+        .hero-actions {
+          justify-content: flex-start;
+        }
+
+        .collapsible-panel > .panel__head {
+          flex-direction: row;
+          align-items: center;
+        }
+
         .panel__body--split {
           grid-template-columns: 1fr;
         }
@@ -1262,12 +1319,19 @@ function buildMonitorPage(): string {
         <div>
           <h1>Monitor y configuracion del agente de impresion</h1>
           <p>
-            Aqui puedes ver el estado del servicio local, vincular este equipo con el backend
-            usando el codigo de seguridad y revisar los ultimos trabajos enviados a impresora.
+            Consulta el estado de impresion de este equipo, sus impresoras configuradas y los
+            trabajos recientes.
           </p>
         </div>
-        <div id="last-refresh" class="refresh-pill">Actualizando...</div>
+        <div class="hero-actions">
+          <button id="test-print-button" class="button button--primary" type="button">
+            Probar impresion
+          </button>
+          <div id="last-refresh" class="refresh-pill">Actualizando...</div>
+        </div>
       </section>
+
+      <div id="test-print-feedback" class="notice test-print-feedback" hidden></div>
 
       <section class="grid">
         <article class="card">
@@ -1287,7 +1351,7 @@ function buildMonitorPage(): string {
           <strong id="uptime">0 s</strong>
         </article>
         <article class="card">
-          <span>Conexion backend</span>
+          <span>Vinculacion</span>
           <strong id="backend-link">Sin vincular</strong>
         </article>
       </section>
@@ -1304,31 +1368,21 @@ function buildMonitorPage(): string {
         </div>
       </section>
 
-      <section class="panel">
-        <div class="panel__head">
+      <details class="panel collapsible-panel">
+        <summary class="panel__head">
           <div>
             <h2>Vinculacion con Gestion al Dia</h2>
-            <p>Ingresa el codigo temporal generado en la app para registrar este equipo.</p>
           </div>
-          <span id="backend-status" class="status status--queued">Sin vincular</span>
-        </div>
+          <div class="summary-status">
+            <span id="backend-status" class="status status--queued">Sin vincular</span>
+            <span class="collapse-indicator" aria-hidden="true"></span>
+          </div>
+        </summary>
         <div class="panel__body panel__body--split">
           <div class="backend-meta">
             <article class="meta-item">
               <span>Estado actual</span>
               <strong id="backend-status-detail">Pendiente de vinculacion</strong>
-            </article>
-            <article class="meta-item">
-              <span>URL backend</span>
-              <strong id="backend-base-url-current">Sin configurar</strong>
-            </article>
-            <article class="meta-item">
-              <span>Agente</span>
-              <strong id="backend-agent-id">Sin registrar</strong>
-            </article>
-            <article class="meta-item">
-              <span>Negocio</span>
-              <strong id="backend-business-id">Sin registrar</strong>
             </article>
             <article class="meta-item">
               <span>Ultimo contacto</span>
@@ -1363,7 +1417,7 @@ function buildMonitorPage(): string {
             <div id="backend-register-feedback" class="notice" hidden></div>
           </form>
         </div>
-      </section>
+      </details>
 
       <section class="panel">
         <div class="panel__head">
@@ -1386,9 +1440,6 @@ function buildMonitorPage(): string {
       const backendLinkNode = document.getElementById('backend-link');
       const backendStatusNode = document.getElementById('backend-status');
       const backendStatusDetailNode = document.getElementById('backend-status-detail');
-      const backendBaseUrlCurrentNode = document.getElementById('backend-base-url-current');
-      const backendAgentIdNode = document.getElementById('backend-agent-id');
-      const backendBusinessIdNode = document.getElementById('backend-business-id');
       const backendLastContactNode = document.getElementById('backend-last-contact');
       const backendLastErrorNode = document.getElementById('backend-last-error');
       const backendRegisterForm = document.getElementById('backend-register-form');
@@ -1398,6 +1449,8 @@ function buildMonitorPage(): string {
       const tableContainerNode = document.getElementById('table-container');
       const printerContainerNode = document.getElementById('printer-container');
       const manualRefreshButton = document.getElementById('manual-refresh');
+      const testPrintButton = document.getElementById('test-print-button');
+      const testPrintFeedback = document.getElementById('test-print-feedback');
 
       function formatDate(value) {
         try {
@@ -1424,9 +1477,6 @@ function buildMonitorPage(): string {
           ? health.backend
           : {
               linked: false,
-              baseUrl: null,
-              agentId: null,
-              businessId: null,
               connected: false,
               lastContactAt: null,
               lastDisconnectReason: null,
@@ -1458,13 +1508,10 @@ function buildMonitorPage(): string {
         backendStatusDetailNode.textContent = !linked
           ? 'Ingresa el codigo temporal para registrar este equipo.'
           : connected
-            ? 'El agente esta conectado al backend y puede recibir trabajos.'
+            ? 'El agente esta conectado y puede recibir trabajos.'
             : backend.lastDisconnectReason
               ? 'Ultima desconexion: ' + backend.lastDisconnectReason
-              : 'El agente esta vinculado, pero sin conexion activa al backend.';
-        backendBaseUrlCurrentNode.textContent = backend.baseUrl || 'URL oficial del agente';
-        backendAgentIdNode.textContent = backend.agentId || 'Sin registrar';
-        backendBusinessIdNode.textContent = backend.businessId || 'Sin registrar';
+              : 'El agente esta vinculado, pero no tiene una conexion activa.';
         backendLastContactNode.textContent = backend.lastContactAt
           ? formatDate(backend.lastContactAt)
           : 'Sin datos';
@@ -1484,6 +1531,50 @@ function buildMonitorPage(): string {
         backendRegisterFeedback.textContent = message;
         backendRegisterFeedback.className =
           'notice ' + (variant === 'ok' ? 'notice--ok' : 'notice--error');
+      }
+
+      function showTestPrintFeedback(message, variant) {
+        testPrintFeedback.hidden = false;
+        testPrintFeedback.textContent = message;
+        testPrintFeedback.className =
+          'notice test-print-feedback ' +
+          (variant === 'ok' ? 'notice--ok' : 'notice--error');
+      }
+
+      function formatTestPrintFeedback(payload) {
+        const result = payload && payload.result ? payload.result : null;
+        const lines = [payload && payload.message ? payload.message : 'La prueba finalizo.'];
+
+        if (!result) {
+          return lines.join('\\n');
+        }
+
+        lines.push('Estado: ' + String(result.status || 'UNKNOWN'));
+        lines.push('Impresora: ' + String(result.printerName || 'Sin datos'));
+        lines.push('Transporte: ' + String(result.transport || 'Sin datos'));
+
+        const attempts = Array.isArray(result.attempts) ? result.attempts : [];
+        attempts.forEach((attempt) => {
+          const details = [
+            'Copia ' + String(attempt.copyNumber || 1) + ': ' + String(attempt.status || 'UNKNOWN'),
+            'Trabajo local: ' + String(attempt.localJobId || 'Sin datos'),
+            'Windows JobId: ' + String(attempt.systemJobId ?? 'No disponible'),
+          ];
+
+          if (Array.isArray(attempt.lastWindowsStatus) && attempt.lastWindowsStatus.length > 0) {
+            details.push('Windows: ' + attempt.lastWindowsStatus.join(', '));
+          }
+          if (attempt.errorCode) {
+            details.push('Codigo: ' + String(attempt.errorCode));
+          }
+          if (attempt.errorMessage) {
+            details.push('Error: ' + String(attempt.errorMessage));
+          }
+
+          lines.push(details.join(' | '));
+        });
+
+        return lines.join('\\n');
       }
 
       function renderJobs(jobs) {
@@ -1704,6 +1795,27 @@ function buildMonitorPage(): string {
         }
       }
 
+      async function runTestPrint() {
+        testPrintButton.disabled = true;
+        testPrintFeedback.hidden = true;
+
+        try {
+          const payload = await postJson('/print/test', {});
+          showTestPrintFeedback(
+            formatTestPrintFeedback(payload),
+            payload && payload.success === true ? 'ok' : 'error',
+          );
+          await refresh();
+        } catch (error) {
+          showTestPrintFeedback(
+            error instanceof Error ? error.message : 'No fue posible ejecutar la impresion de prueba.',
+            'error',
+          );
+        } finally {
+          testPrintButton.disabled = false;
+        }
+      }
+
       async function registerBackend(event) {
         event.preventDefault();
 
@@ -1753,6 +1865,10 @@ function buildMonitorPage(): string {
 
       manualRefreshButton.addEventListener('click', () => {
         void refresh();
+      });
+
+      testPrintButton.addEventListener('click', () => {
+        void runTestPrint();
       });
 
       printerContainerNode.addEventListener('click', (event) => {
