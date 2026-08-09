@@ -100,6 +100,38 @@ test('clears the local token, stops background work, and notifies on backend 403
   }
 });
 
+test('reports an invalid pairing code without expiring an existing agent session', async () => {
+  const restoreFetch = global.fetch;
+  const savedConfigs = [];
+  const notifications = [];
+  let stopCalls = 0;
+
+  global.fetch = async () => ({
+    ok: false,
+    status: 401,
+    text: async () =>
+      JSON.stringify({ message: 'Codigo de vinculacion invalido o vencido.' }),
+  });
+
+  try {
+    const service = createService({ savedConfigs, notifications, warnings: [] });
+    service.stop = () => {
+      stopCalls += 1;
+    };
+
+    await assert.rejects(
+      service.register('123456'),
+      /Codigo de vinculacion invalido o vencido\./,
+    );
+
+    assert.equal(stopCalls, 0);
+    assert.deepEqual(savedConfigs, []);
+    assert.deepEqual(notifications, []);
+  } finally {
+    global.fetch = restoreFetch;
+  }
+});
+
 test('accepts successful empty backend responses without JSON parse failures', async () => {
   const restoreFetch = global.fetch;
 
@@ -554,6 +586,7 @@ test('uses the configured backend base URL for registration, revocation handling
 function createService({ savedConfigs, notifications, warnings, configOverrides = {} }) {
   const config = {
     backendBaseUrl: null,
+    backendDeviceId: 'device-existing',
     backendDeviceToken: 'device-token',
     ...configOverrides,
   };

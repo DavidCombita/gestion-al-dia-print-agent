@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { io, Socket } from 'socket.io-client';
 import { AppConfigService } from '../config/app-config.service';
 import { LoggerService } from '../logs/logger.service';
@@ -143,6 +144,8 @@ export class BackendPrintClientService {
   }
 
   async register(pairingCode: string): Promise<RegisterBackendAgentResponse> {
+    const deviceName = this.resolveDeviceName();
+    const deviceId = this.resolveDeviceId();
     const response = await this.request<RegisterBackendAgentResponse>(
       this.resolveBaseUrl(),
       '/print-agents/register',
@@ -150,11 +153,11 @@ export class BackendPrintClientService {
         method: 'POST',
         body: {
           pairingCode,
-          deviceName: this.resolveDeviceName(),
+          deviceName,
           platform: 'WINDOWS',
           version: this.dependencies.version,
-          machineName: this.resolveDeviceName(),
-          deviceId: this.resolveDeviceName(),
+          machineName: deviceName,
+          deviceId,
         },
       },
       null,
@@ -625,11 +628,14 @@ export class BackendPrintClientService {
     }
 
     if (!response.ok) {
-      if (response.status === 401 || response.status === 403) {
+      const backendMessage = await this.parseBackendErrorResponse(response, path);
+
+      if (token && (response.status === 401 || response.status === 403)) {
         this.handleBackendAuthenticationExpired(response.status);
         throw new BackendAgentAuthExpiredError(response.status);
       }
-      throw new Error(`Backend respondio ${response.status}`);
+
+      throw new Error(backendMessage);
     }
 
     this.recordSuccessfulContact();
@@ -659,6 +665,47 @@ export class BackendPrintClientService {
         `Backend respondio ${response.status} con cuerpo no JSON en ${path}: ${this.previewResponseBody(normalizedBody)}`,
       );
     }
+  }
+
+  private async parseBackendErrorResponse(
+    response: Response,
+    path: string,
+  ): Promise<string> {
+    const fallback = `Backend respondio ${response.status} en ${path}.`;
+
+    try {
+      let payload: unknown;
+
+      if (typeof response.text === 'function') {
+        const rawBody = (await response.text()).trim();
+        if (!rawBody) {
+          return fallback;
+        }
+
+        try {
+          payload = JSON.parse(rawBody);
+        } catch {
+          return `${fallback} ${this.previewResponseBody(rawBody)}`;
+        }
+      } else if (typeof response.json === 'function') {
+        payload = await response.json();
+      }
+
+      if (payload && typeof payload === 'object' && 'message' in payload) {
+        const message = (payload as { message?: unknown }).message;
+
+        if (typeof message === 'string' && message.trim()) {
+          return message.trim();
+        }
+        if (Array.isArray(message) && message.length > 0) {
+          return message.map((entry) => String(entry)).join(' ');
+        }
+      }
+    } catch {
+      return fallback;
+    }
+
+    return fallback;
   }
 
   private previewResponseBody(value: string): string {
@@ -699,6 +746,18 @@ export class BackendPrintClientService {
       process.env.HOSTNAME ||
       'Gestion al Dia Print Agent'
     );
+  }
+
+  private resolveDeviceId(): string {
+    const config = this.dependencies.configService.getConfig();
+
+    if (config.backendDeviceId) {
+      return config.backendDeviceId;
+    }
+
+    const deviceId = crypto.randomUUID();
+    this.dependencies.configService.saveConfig({ backendDeviceId: deviceId });
+    return deviceId;
   }
 
   private mapPrintError(error: unknown): string {

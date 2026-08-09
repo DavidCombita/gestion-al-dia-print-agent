@@ -1702,52 +1702,86 @@ function buildMonitorPage(): string {
         }).join('');
       }
 
+      async function fetchMonitorResource(path, fallbackMessage) {
+        const response = await fetch(path, { cache: 'no-store' });
+        const payload = await response.json().catch(() => null);
+
+        if (!response.ok) {
+          throw new Error(payload && payload.message ? payload.message : fallbackMessage);
+        }
+
+        return payload;
+      }
+
+      function rejectedMessage(result, fallbackMessage) {
+        return result.status === 'rejected' && result.reason instanceof Error
+          ? result.reason.message
+          : fallbackMessage;
+      }
+
       async function refresh() {
         manualRefreshButton.disabled = true;
 
         try {
-          const [healthResponse, jobsResponse, printersResponse] = await Promise.all([
-            fetch('/health', { cache: 'no-store' }),
-            fetch('/jobs', { cache: 'no-store' }),
-            fetch('/printing/status', { cache: 'no-store' }),
+          const [healthResult, jobsResult, printersResult] = await Promise.allSettled([
+            fetchMonitorResource('/health', 'No fue posible leer el estado del servicio local.'),
+            fetchMonitorResource('/jobs', 'No fue posible leer el historial de impresion.'),
+            fetchMonitorResource('/printing/status', 'No fue posible leer el estado de las impresoras.'),
           ]);
+          const issues = [];
 
-          if (!healthResponse.ok) {
-            throw new Error('No fue posible leer el estado del servicio local.');
+          if (healthResult.status === 'fulfilled') {
+            const health = healthResult.value;
+            renderBackendStatus(health);
+            serviceStatusNode.textContent = health.printerModuleReady ? 'Listo' : 'Con incidencias';
+            pendingJobsNode.textContent = String(health.queue?.pendingJobs ?? 0);
+            activeJobNode.textContent = health.queue?.activeJobLabel || 'Sin trabajo';
+            uptimeNode.textContent = String(health.uptimeSeconds ?? 0) + ' s';
+
+            if (!health.printerModuleReady && health.printerModuleError) {
+              issues.push(String(health.printerModuleError));
+            }
+          } else {
+            const message = rejectedMessage(
+              healthResult,
+              'No fue posible leer el estado del servicio local.',
+            );
+            issues.push(message);
+            backendLinkNode.textContent = 'Sin datos';
+            backendStatusNode.textContent = 'Sin datos';
+            backendStatusNode.className = 'status status--failed';
+            backendStatusDetailNode.textContent = 'No fue posible consultar la vinculacion actual.';
+            serviceStatusNode.textContent = 'Error';
           }
 
-          if (!jobsResponse.ok) {
-            throw new Error('No fue posible leer el historial de impresion.');
+          if (jobsResult.status === 'fulfilled') {
+            const jobs = Array.isArray(jobsResult.value.jobs) ? jobsResult.value.jobs : [];
+            renderJobs(jobs);
+          } else {
+            const message = rejectedMessage(
+              jobsResult,
+              'No fue posible leer el historial de impresion.',
+            );
+            issues.push(message);
+            tableContainerNode.innerHTML =
+              '<div class="empty error-text">' + escapeHtml(message) + '</div>';
           }
 
-          if (!printersResponse.ok) {
-            throw new Error('No fue posible leer el estado de las impresoras.');
+          if (printersResult.status === 'fulfilled') {
+            renderPrinters(printersResult.value);
+          } else {
+            const message = rejectedMessage(
+              printersResult,
+              'No fue posible leer el estado de las impresoras.',
+            );
+            issues.push(message);
+            printerContainerNode.innerHTML =
+              '<div class="empty error-text">' + escapeHtml(message) + '</div>';
           }
 
-          const health = await healthResponse.json();
-          const jobsPayload = await jobsResponse.json();
-          const printersPayload = await printersResponse.json();
-          const jobs = Array.isArray(jobsPayload.jobs) ? jobsPayload.jobs : [];
-
-          renderBackendStatus(health);
-          serviceStatusNode.textContent = health.printerModuleReady ? 'Listo' : 'Con incidencias';
-          pendingJobsNode.textContent = String(health.queue?.pendingJobs ?? 0);
-          activeJobNode.textContent = health.queue?.activeJobLabel || 'Sin trabajo';
-          uptimeNode.textContent = String(health.uptimeSeconds ?? 0) + ' s';
-          renderJobs(jobs);
-          renderPrinters(printersPayload);
-          lastRefreshNode.textContent = 'Ultima actualizacion: ' + formatDate(new Date().toISOString());
-        } catch (error) {
-          backendLinkNode.textContent = 'Sin datos';
-          backendStatusNode.textContent = 'Sin datos';
-          backendStatusNode.className = 'status status--failed';
-          backendStatusDetailNode.textContent = 'No fue posible consultar la vinculacion actual.';
-          serviceStatusNode.textContent = 'Error';
-          tableContainerNode.innerHTML =
-            '<div class="empty error-text">' +
-            escapeHtml(error instanceof Error ? error.message : 'No fue posible actualizar el monitor.') +
-            '</div>';
-          lastRefreshNode.textContent = 'No fue posible actualizar';
+          lastRefreshNode.textContent = issues.length > 0
+            ? 'Actualizacion parcial (' + String(new Set(issues).size) + ' incidencia(s))'
+            : 'Ultima actualizacion: ' + formatDate(new Date().toISOString());
         } finally {
           manualRefreshButton.disabled = false;
         }

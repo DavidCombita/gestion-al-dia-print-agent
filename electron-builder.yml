@@ -7,8 +7,6 @@ files:
   - dist/**/*
   - package.json
 asar: true
-asarUnpack:
-  - node_modules/printer/**/*
 electronUpdaterCompatibility: '>=2.16'
 extraResources:
   - from: build
@@ -16,6 +14,13 @@ extraResources:
     filter:
       - icon.ico
       - tray-icon.png
+  - from: node_modules/printer
+    to: printer-runtime
+    filter:
+      - package.json
+      - lib/**/*
+      - build/Release/node_printer.node
+afterPack: scripts/verify-packaged-printer.js
 win:
   icon: build/icon.ico
   target:

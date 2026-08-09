@@ -332,9 +332,7 @@ function resolvePrinterModulePath(): string {
   if (app.isPackaged) {
     return path.join(
       process.resourcesPath,
-      'app.asar.unpacked',
-      'node_modules',
-      'printer',
+      'printer-runtime',
       'lib',
       'printer.js',
     );

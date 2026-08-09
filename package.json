@@ -1,6 +1,6 @@
 {
   "name": "gestion-al-dia-print-agent",
-  "version": "2.0.9",
+  "version": "2.0.10",
   "description": "Agente local de impresion termica para Gestion al Dia en Windows.",
   "main": "dist/main/electron-main.js",
   "author": "Codex",
@@ -49,9 +49,6 @@
       "package.json"
     ],
     "asar": true,
-    "asarUnpack": [
-      "node_modules/printer/**/*"
-    ],
     "electronUpdaterCompatibility": ">=2.16",
     "extraResources": [
       {
@@ -61,8 +58,18 @@
           "icon.ico",
           "tray-icon.png"
         ]
+      },
+      {
+        "from": "node_modules/printer",
+        "to": "printer-runtime",
+        "filter": [
+          "package.json",
+          "lib/**/*",
+          "build/Release/node_printer.node"
+        ]
       }
     ],
+    "afterPack": "scripts/verify-packaged-printer.js",
     "win": {
       "icon": "build/icon.ico",
       "target": [

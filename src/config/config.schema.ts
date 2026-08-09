@@ -15,6 +15,7 @@ export interface AppConfig {
   backendBaseUrl: string | null;
   backendAgentId: string | null;
   backendBusinessId: string | null;
+  backendDeviceId: string | null;
   backendDeviceToken: string | null;
   printerProfiles: PrinterProfile[];
   printJobPollIntervalMs: number;
@@ -42,6 +43,7 @@ export const defaultAppConfig: AppConfig = {
   backendBaseUrl: null,
   backendAgentId: null,
   backendBusinessId: null,
+  backendDeviceId: null,
   backendDeviceToken: null,
   printerProfiles: [],
   printJobPollIntervalMs: 750,
@@ -66,6 +68,7 @@ export function sanitizeAppConfig(value: unknown): AppConfig {
     backendBaseUrl: normalizeBackendBaseUrl(record.backendBaseUrl),
     backendAgentId: normalizeNullableString(record.backendAgentId),
     backendBusinessId: normalizeNullableString(record.backendBusinessId),
+    backendDeviceId: normalizeNullableString(record.backendDeviceId),
     backendDeviceToken: normalizeNullableString(record.backendDeviceToken),
     printerProfiles: normalizePrinterProfiles(record.printerProfiles, paperWidth),
     printJobPollIntervalMs: normalizeInteger(
