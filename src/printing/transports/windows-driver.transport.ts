@@ -73,7 +73,7 @@ export class WindowsDriverTransport implements PrintTransport {
       observed: false,
       code: 'DRIVER_SUBMIT_ACCEPTED_NO_JOB_ID',
       message:
-        'El driver de Windows acepto el trabajo. Electron no expone su JobId ni confirma la salida fisica.',
+        'Electron confirmo que Windows acepto el trabajo. No hay JobId disponible, por lo que el agente lo da por completado y continua.',
       retrySafety: 'UNSAFE_TO_RETRY',
     };
   }

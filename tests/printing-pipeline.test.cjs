@@ -473,7 +473,7 @@ test('finishes an accepted Windows driver job without opening an untrackable cir
 
   assert.equal(status.state, 'SPOOL_COMPLETED');
   assert.equal(status.code, 'DRIVER_SUBMIT_ACCEPTED_NO_JOB_ID');
-  assert.match(status.message, /no expone.*ni confirma la salida fisica/i);
+  assert.match(status.message, /da por completado y continua/i);
 });
 
 test('builds a complete invoice with a different reference for every printer test', async () => {
