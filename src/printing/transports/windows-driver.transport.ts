@@ -69,11 +69,11 @@ export class WindowsDriverTransport implements PrintTransport {
 
   async getJobStatus(_job: SubmittedPrintJob): Promise<PrintTransportJobStatus> {
     return {
-      state: 'UNKNOWN',
+      state: 'SPOOL_COMPLETED',
       observed: false,
-      code: 'DRIVER_JOB_ID_UNAVAILABLE',
+      code: 'DRIVER_SUBMIT_ACCEPTED_NO_JOB_ID',
       message:
-        'Electron no expone el Windows JobId de webContents.print; no se puede confirmar el estado del spooler.',
+        'El driver de Windows acepto el trabajo. Electron no expone su JobId ni confirma la salida fisica.',
       retrySafety: 'UNSAFE_TO_RETRY',
     };
   }
@@ -132,4 +132,3 @@ export class WindowsDriverTransport implements PrintTransport {
     });
   }
 }
-

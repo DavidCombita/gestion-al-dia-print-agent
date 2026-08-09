@@ -6,6 +6,9 @@ const test = require('node:test');
 
 const { PrintHistoryService } = require('../dist/printing/history/print-history.service.js');
 const { PrintOrchestratorService } = require('../dist/printing/print-orchestrator.service.js');
+const { PrintDiagnosticsService } = require('../dist/printing/diagnostics/print-diagnostics.service.js');
+const { formatInvoice } = require('../dist/printing/formatters/invoice.formatter.js');
+const { formatPrintJobHtml } = require('../dist/printing/formatters/html-ticket.formatter.js');
 const { PrinterQueueService } = require('../dist/printing/queue/printer-queue.service.js');
 const { PrintTransportRegistry } = require('../dist/printing/transports/print-transport.registry.js');
 const { WindowsDriverTransport } = require('../dist/printing/transports/windows-driver.transport.js');
@@ -88,6 +91,24 @@ test('treats disappearance after observation as SPOOL_COMPLETED', async () => {
   assert.equal(result.code, 'WINDOWS_JOB_DISAPPEARED_AFTER_OBSERVATION');
 });
 
+test('treats an accepted job without Windows JobId as completed', async () => {
+  const transport = new FakeTransport({
+    statuses: [
+      {
+        state: 'UNKNOWN',
+        observed: false,
+        retrySafety: 'UNSAFE_TO_RETRY',
+      },
+    ],
+  });
+  const job = { ...submittedJob(), systemJobId: undefined };
+  const result = await createClockedMonitor().monitor(job, transport);
+
+  assert.equal(result.state, 'SPOOL_COMPLETED');
+  assert.equal(result.code, 'WINDOWS_JOB_ID_UNAVAILABLE_ACCEPTED');
+  assert.match(result.message, /continua sin bloquear/i);
+});
+
 test('maps PAPEROUT to a terminal STUCK state', () => {
   const result = mapWindowsJobStatus({ statusNumber: WINDOWS_JOB_STATUS.PAPEROUT });
 
@@ -107,6 +128,19 @@ test('maps COMPLETE to spool completion without claiming physical output', () =>
     'WINDOWS_JOB_COMPLETE_NO_PHYSICAL_CONFIRMATION',
   );
   assert.match(result.message, /no confirma salida fisica/i);
+});
+
+test('treats ERROR plus PRINTING plus RETAINED as completed', () => {
+  const result = mapWindowsJobStatus({
+    statusNumber:
+      WINDOWS_JOB_STATUS.ERROR |
+      WINDOWS_JOB_STATUS.PRINTING |
+      WINDOWS_JOB_STATUS.RETAINED,
+  });
+
+  assert.equal(result.state, 'SPOOL_COMPLETED');
+  assert.equal(result.code, 'WINDOWS_JOB_RETAINED_WITH_ERROR_FLAG');
+  assert.match(result.message, /ignora.*ERROR/i);
 });
 
 test('maps numeric Windows printer availability independently from job status', () => {
@@ -152,6 +186,72 @@ test('opens the circuit breaker for the affected printer after STUCK', async (t)
   assert.equal(rejected.status, 'FAILED');
   assert.equal(rejected.attempts[0].errorCode, 'PRINTER_CIRCUIT_OPEN');
   assert.equal(transport.submitCalls.length, 1);
+});
+
+test('resolves a retained blocking JobId before a repeated manual test', async (t) => {
+  const transport = new FakeTransport({
+    statuses: [
+      mapWindowsJobStatus({
+        statusNumber: WINDOWS_JOB_STATUS.PRINTING | WINDOWS_JOB_STATUS.RETAINED,
+      }),
+    ],
+  });
+  const harness = createHarness(t, { transport });
+  const record = harness.history.createJob({
+    printerName: 'POS-80C',
+    documentName: 'GAD-retained-1',
+    jobType: 'RECEIPT',
+    copyNumber: 1,
+    copies: 1,
+    transport: 'WINDOWS_RAW',
+    windowsJobId: 8,
+    windowsJobObserved: true,
+    status: 'STUCK',
+    retrySafety: 'UNSAFE_TO_RETRY',
+  });
+  harness.queue.blockPrinter('POS-80C', record.localJobId, 'Trabajo retenido.');
+
+  await harness.orchestrator.preparePrinterForManualTest('POS-80C');
+  const repeated = await harness.orchestrator.execute(printRequest('POS-80C'));
+
+  assert.equal(harness.history.getJob(record.localJobId).status, 'SPOOL_COMPLETED');
+  assert.equal(harness.queue.getPrinterSnapshot('POS-80C').health, 'HEALTHY');
+  assert.equal(repeated.status, 'SPOOL_COMPLETED');
+  assert.equal(transport.submitCalls.length, 1);
+});
+
+test('cancels the exact stuck JobId before a repeated manual test', async (t) => {
+  const transport = new FakeTransport({
+    statuses: [
+      stuckStatus(),
+      {
+        state: 'CANCELLED',
+        exists: false,
+        observed: true,
+        retrySafety: 'SAFE_TO_RETRY',
+      },
+    ],
+  });
+  const harness = createHarness(t, { transport });
+  const record = harness.history.createJob({
+    printerName: 'POS-80C',
+    documentName: 'GAD-stuck-manual-test',
+    jobType: 'RECEIPT',
+    copyNumber: 1,
+    copies: 1,
+    transport: 'WINDOWS_RAW',
+    windowsJobId: 77,
+    windowsJobObserved: true,
+    status: 'STUCK',
+    retrySafety: 'UNSAFE_TO_RETRY',
+  });
+  harness.queue.blockPrinter('POS-80C', record.localJobId, 'Trabajo atascado.');
+
+  await harness.orchestrator.preparePrinterForManualTest('POS-80C');
+
+  assert.deepEqual(transport.cancelCalls, [77]);
+  assert.equal(harness.history.getJob(record.localJobId).status, 'CANCELLED');
+  assert.equal(harness.queue.getPrinterSnapshot('POS-80C').health, 'HEALTHY');
 });
 
 test('keeps another printer operational when one printer is blocked', async (t) => {
@@ -250,6 +350,53 @@ test('reconciles an accepted job after restart without submitting it again', asy
   assert.equal(harness.history.getJob(record.localJobId).status, 'SPOOL_COMPLETED');
 });
 
+test('reconciles an accepted job without JobId and keeps the printer available', async (t) => {
+  const transport = new FakeTransport();
+  const harness = createHarness(t, { transport });
+  const record = harness.history.createJob({
+    printerName: 'POS-80C',
+    documentName: 'GAD-driver-no-job-id',
+    jobType: 'RECEIPT',
+    copyNumber: 1,
+    copies: 1,
+    transport: 'WINDOWS_RAW',
+    submittedAt: new Date().toISOString(),
+    retrySafety: 'UNSAFE_TO_RETRY',
+    status: 'UNKNOWN',
+  });
+  harness.queue.blockPrinter('POS-80C', record.localJobId, 'No hay JobId.');
+
+  const results = await harness.orchestrator.reconcilePendingJobs();
+
+  assert.equal(results[0].status, 'SPOOL_COMPLETED');
+  assert.equal(results[0].errorCode, 'WINDOWS_JOB_ID_UNAVAILABLE_ACCEPTED');
+  assert.equal(transport.submitCalls.length, 0);
+  assert.equal(harness.history.getJob(record.localJobId).status, 'SPOOL_COMPLETED');
+  assert.equal(harness.queue.getPrinterSnapshot('POS-80C').health, 'HEALTHY');
+});
+
+test('refreshes an accepted job without JobId as completed and unblocks its printer', async (t) => {
+  const harness = createHarness(t);
+  const record = harness.history.createJob({
+    printerName: 'POS-80C',
+    documentName: 'GAD-driver-no-job-id-refresh',
+    jobType: 'RECEIPT',
+    copyNumber: 1,
+    copies: 1,
+    transport: 'WINDOWS_RAW',
+    submittedAt: new Date().toISOString(),
+    retrySafety: 'UNSAFE_TO_RETRY',
+    status: 'UNKNOWN',
+  });
+  harness.queue.blockPrinter('POS-80C', record.localJobId, 'No hay JobId.');
+
+  const refreshed = await harness.orchestrator.refreshJobStatus(record.localJobId);
+
+  assert.equal(refreshed.status, 'SPOOL_COMPLETED');
+  assert.equal(refreshed.errorCode, 'WINDOWS_JOB_ID_UNAVAILABLE_ACCEPTED');
+  assert.equal(harness.queue.getPrinterSnapshot('POS-80C').health, 'HEALTHY');
+});
+
 test('reports PARTIAL_FAILURE without resubmitting a completed copy', async (t) => {
   const transport = new FakeTransport({
     statusFactory(job) {
@@ -300,6 +447,100 @@ test('propagates Electron failureReason from the driver transport', async () => 
       return true;
     },
   );
+});
+
+test('finishes an accepted Windows driver job without opening an untrackable circuit', async () => {
+  const transport = new WindowsDriverTransport(
+    () => ({
+      async loadURL() {},
+      webContents: {
+        print(_options, callback) {
+          callback(true, '');
+        },
+      },
+      destroy() {},
+    }),
+    1_000,
+  );
+  const submitted = await transport.submit({
+    printer: { systemName: 'POS-80C' },
+    documentName: 'driver-test',
+    html: '<html><body>Factura completa</body></html>',
+    payloadBytes: 43,
+    driverOptions: { usePrinterDefaultPageSize: true },
+  });
+  const status = await transport.getJobStatus(submitted);
+
+  assert.equal(status.state, 'SPOOL_COMPLETED');
+  assert.equal(status.code, 'DRIVER_SUBMIT_ACCEPTED_NO_JOB_ID');
+  assert.match(status.message, /no expone.*ni confirma la salida fisica/i);
+});
+
+test('builds a complete invoice with a different reference for every printer test', async () => {
+  const requests = [];
+  let preparationCalls = 0;
+  const completed = {
+    status: 'SPOOL_COMPLETED',
+    retrySafety: 'UNSAFE_TO_RETRY',
+    printerName: 'POS-80C',
+    transport: 'WINDOWS_RAW',
+    copies: 1,
+    attempts: [],
+  };
+  const service = new PrintDiagnosticsService(
+    {
+      async preparePrinterForManualTest() {
+        preparationCalls += 1;
+      },
+      async execute(request) {
+        requests.push(request);
+        return completed;
+      },
+    },
+    {
+      resolveProfile(systemName) {
+        return {
+          systemName,
+          transport: 'WINDOWS_RAW',
+          paperWidth: '80mm',
+        };
+      },
+    },
+    {},
+    {},
+    {},
+    {},
+    {
+      appVersion: 'test',
+      electronVersion: 'test',
+      nodeVersion: 'test',
+      arch: 'x64',
+    },
+  );
+
+  await service.runInvoice('POS-80C');
+  await service.runInvoice('POS-80C');
+
+  assert.equal(preparationCalls, 2);
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].payload.title, 'FACTURA DE PRUEBA');
+  assert.equal(requests[0].payload.items.length, 3);
+  assert.equal(requests[0].payload.totals.total, 48_000);
+  assert.equal(requests[0].payload.paymentBreakdown[0].label, 'Efectivo');
+  assert.match(requests[0].payload.items[2].notes, /POS-80C/);
+  assert.notEqual(requests[0].payload.order.id, requests[1].payload.order.id);
+
+  const rawInvoice = formatInvoice(requests[0].payload).toString('latin1');
+  const driverInvoice = formatPrintJobHtml(
+    'RECEIPT',
+    requests[0].payload,
+    'factura-prueba',
+  );
+  assert.match(rawInvoice, /FACTURA DE PRUEBA/);
+  assert.match(rawInvoice, /Cafe colombiano/);
+  assert.match(rawInvoice, /TOTAL/);
+  assert.match(driverInvoice, /FACTURA DE PRUEBA/);
+  assert.match(driverInvoice, /Almuerzo ejecutivo/);
 });
 
 test('classifies a RAW failure after possible Windows acceptance as unsafe', async () => {

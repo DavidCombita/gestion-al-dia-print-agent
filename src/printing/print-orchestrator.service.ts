@@ -100,6 +100,10 @@ export class PrintOrchestratorService {
         }
 
         if (!record.windowsJobId) {
+          if (wasAcceptedWithoutJobId(record)) {
+            return this.finalizeAcceptedWithoutJobId(record).result;
+          }
+
           const result = this.finalizeInterruptedSubmit(record);
           this.blockPrinter(record, result);
           return result;
@@ -199,6 +203,49 @@ export class PrintOrchestratorService {
     return result;
   }
 
+  private finalizeAcceptedWithoutJobId(record: PrintJobRecord): {
+    record: PrintJobRecord;
+    result: PrintCopyResult;
+  } {
+    const completedAt = new Date().toISOString();
+    const errorCode = 'WINDOWS_JOB_ID_UNAVAILABLE_ACCEPTED';
+    const errorMessage =
+      'Windows acepto el trabajo, pero no entrego un JobId para seguirlo. El agente lo da por completado y continua.';
+    const result: PrintCopyResult = {
+      localJobId: record.localJobId,
+      attemptId: record.attemptId,
+      copyNumber: record.copyNumber,
+      status: 'SPOOL_COMPLETED',
+      retrySafety: 'UNSAFE_TO_RETRY',
+      submitted: true,
+      printerName: record.printerName,
+      documentName: record.documentName,
+      transport: record.transport,
+      submittedAt: record.submittedAt ?? record.updatedAt,
+      completedAt,
+      payloadBytes: record.payloadBytes,
+      errorCode,
+      errorMessage,
+      elapsedMs: record.elapsedMs ?? 0,
+    };
+    const updated = this.dependencies.historyService.updateJob(record.localJobId, {
+      status: result.status,
+      completedAt,
+      errorCode,
+      errorMessage,
+      retrySafety: result.retrySafety,
+    });
+    this.dependencies.queueService.unblockPrinterIfBlockedBy(
+      record.printerName,
+      record.localJobId,
+    );
+    this.logStage(record, 'WINDOWS_JOB_ACCEPTED_WITHOUT_JOB_ID', Date.now(), {
+      status: result.status,
+      errorCode,
+    });
+    return { record: updated, result };
+  }
+
   async cancelJob(localJobId: string): Promise<PrintJobRecord> {
     const record = this.dependencies.historyService.getJob(localJobId);
 
@@ -255,6 +302,51 @@ export class PrintOrchestratorService {
     this.dependencies.queueService.unblockPrinter(requirePrinterName(printerName));
   }
 
+  async preparePrinterForManualTest(printerName: string): Promise<void> {
+    const normalizedPrinterName = requirePrinterName(printerName);
+    const queue = this.dependencies.queueService.getPrinterSnapshot(
+      normalizedPrinterName,
+    );
+
+    if (queue.health !== 'BLOCKED') {
+      return;
+    }
+
+    const blockingJobId = queue.blockedByLocalJobId;
+    if (!blockingJobId) {
+      this.dependencies.queueService.unblockPrinter(normalizedPrinterName);
+      return;
+    }
+
+    let refreshError: unknown;
+
+    try {
+      await this.refreshJobStatus(blockingJobId);
+      if (!this.dependencies.queueService.isBlocked(normalizedPrinterName)) {
+        return;
+      }
+    } catch (error) {
+      refreshError = error;
+    }
+
+    const blockingJob = this.dependencies.historyService.getJob(blockingJobId);
+    if (!blockingJob?.windowsJobId) {
+      this.dependencies.queueService.unblockPrinter(normalizedPrinterName);
+      return;
+    }
+
+    try {
+      await this.cancelJob(blockingJobId);
+    } catch (cancelError) {
+      const refreshDetail = refreshError
+        ? ` Consulta previa: ${describeError(refreshError)}`
+        : '';
+      throw new Error(
+        `No fue posible liberar el Windows JobId ${blockingJob.windowsJobId} antes de la prueba. ${describeError(cancelError)}${refreshDetail}`,
+      );
+    }
+  }
+
   async refreshJobStatus(localJobId: string): Promise<PrintJobRecord> {
     const record = this.dependencies.historyService.getJob(localJobId);
 
@@ -263,6 +355,10 @@ export class PrintOrchestratorService {
     }
 
     if (!record.windowsJobId) {
+      if (wasAcceptedWithoutJobId(record)) {
+        return this.finalizeAcceptedWithoutJobId(record).record;
+      }
+
       throw new Error('El trabajo no tiene Windows JobId para consultar.');
     }
 
@@ -708,6 +804,15 @@ function toSubmittedJob(record: PrintJobRecord): SubmittedPrintJob {
   };
 }
 
+function wasAcceptedWithoutJobId(record: PrintJobRecord): boolean {
+  return (
+    Boolean(record.submittedAt) ||
+    record.status === 'SUBMITTED' ||
+    record.status === 'SPOOLING' ||
+    record.status === 'PRINTING'
+  );
+}
+
 function buildDocumentName(request: PrintExecutionRequest, copyNumber: number): string {
   const base = request.documentName?.trim() || request.jobType;
   const correlation = request.backendJobId?.trim() || crypto.randomUUID().slice(0, 8);
@@ -726,6 +831,10 @@ function requirePrinterName(value: string): string {
   }
 
   return normalized;
+}
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function normalizeCopies(value: number | undefined): number {

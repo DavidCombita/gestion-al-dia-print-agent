@@ -421,6 +421,22 @@ export class LocalServer {
       }
     });
 
+    this.app.post('/printing/diagnostics/invoice', async (request, response, next) => {
+      try {
+        const printerName = requireBodyPrinterName(request.body?.printerName);
+        const result = await this.dependencies.printDiagnosticsService.runInvoice(
+          printerName,
+        );
+        response.json({
+          success: result.status === 'SPOOL_COMPLETED',
+          message: describePrintResult('Factura de prueba', result.status),
+          result,
+        });
+      } catch (error) {
+        next(error);
+      }
+    });
+
     this.app.get('/printing/diagnostics/export', async (request, response, next) => {
       try {
         const printerName = requireBodyPrinterName(request.query.printerName);
@@ -465,17 +481,10 @@ export class LocalServer {
     this.app.post('/print/test', async (_request, response, next) => {
       try {
         const config = this.dependencies.configService.getConfig();
-        const payload = buildTestPayload(config.paperWidth);
         const printerName = resolveConfiguredPrinter(config.invoicePrinterName, 'facturas');
-        const result = await this.dependencies.printOrchestrator.execute({
-          source: 'LOCAL',
-          jobType: 'RECEIPT',
-          payload,
+        const result = await this.dependencies.printDiagnosticsService.runInvoice(
           printerName,
-          documentName: 'factura-prueba-local',
-          copies: 1,
-          paperWidth: config.paperWidth,
-        });
+        );
         response.json({
           success: result.status === 'SPOOL_COMPLETED',
           message: describePrintResult('Factura de prueba', result.status),
@@ -639,47 +648,6 @@ export class LocalServer {
       }
     });
   }
-}
-
-function buildTestPayload(paperWidth: '58mm' | '80mm'): ReceiptJobPayload {
-  return {
-    title: 'FACTURA DE PRUEBA',
-    business: {
-      name: 'Gestion al Dia',
-      nit: '900123456-7',
-      address: 'Calle 123 #45-67',
-      phone: '+57 300 123 4567',
-    },
-    order: {
-      id: 'TEST-001',
-      createdAt: new Date().toISOString(),
-      tableName: 'Mesa 1',
-      waiterName: 'Sistema',
-    },
-    items: [
-      {
-        name: 'Validacion de impresion',
-        quantity: 1,
-        unitPrice: 0,
-        total: 0,
-        notes: 'Ticket generado desde el agente local',
-      },
-    ],
-    totals: {
-      subtotal: 0,
-      tax: 0,
-      discount: 0,
-      total: 0,
-      paid: 0,
-      change: 0,
-    },
-    options: {
-      copies: 1,
-      cutPaper: true,
-      openCashDrawer: false,
-      paperWidth,
-    },
-  };
 }
 
 function resolveConfiguredPrinter(
@@ -1555,20 +1523,28 @@ function buildMonitorPage(): string {
 
         const attempts = Array.isArray(result.attempts) ? result.attempts : [];
         attempts.forEach((attempt) => {
+          const completed = attempt.status === 'SPOOL_COMPLETED';
           const details = [
             'Copia ' + String(attempt.copyNumber || 1) + ': ' + String(attempt.status || 'UNKNOWN'),
             'Trabajo local: ' + String(attempt.localJobId || 'Sin datos'),
-            'Windows JobId: ' + String(attempt.systemJobId ?? 'No disponible'),
           ];
+
+          if (attempt.systemJobId) {
+            details.push('Windows JobId: ' + String(attempt.systemJobId));
+          }
 
           if (Array.isArray(attempt.lastWindowsStatus) && attempt.lastWindowsStatus.length > 0) {
             details.push('Windows: ' + attempt.lastWindowsStatus.join(', '));
           }
           if (attempt.errorCode) {
-            details.push('Codigo: ' + String(attempt.errorCode));
+            details.push(
+              (completed ? 'Detalle tecnico: ' : 'Codigo: ') + String(attempt.errorCode),
+            );
           }
           if (attempt.errorMessage) {
-            details.push('Error: ' + String(attempt.errorMessage));
+            details.push(
+              (completed ? 'Detalle: ' : 'Error: ') + String(attempt.errorMessage),
+            );
           }
 
           lines.push(details.join(' | '));
@@ -1587,15 +1563,20 @@ function buildMonitorPage(): string {
         const rows = jobs
           .map((job) => {
             const diagnosticDetails = [];
+            const completed = job.status === 'SPOOL_COMPLETED';
+            const detailClass = completed ? 'job-meta' : 'error-text';
 
             if (job.errorCode) {
               diagnosticDetails.push(
-                '<div class="error-text">Codigo: ' + escapeHtml(job.errorCode) + '</div>',
+                '<div class="' + detailClass + '">' +
+                (completed ? 'Detalle tecnico: ' : 'Codigo: ') +
+                escapeHtml(job.errorCode) +
+                '</div>',
               );
             }
             if (job.errorMessage) {
               diagnosticDetails.push(
-                '<div class="error-text">' + escapeHtml(job.errorMessage) + '</div>',
+                '<div class="' + detailClass + '">' + escapeHtml(job.errorMessage) + '</div>',
               );
             }
             if (Array.isArray(job.lastWindowsStatus) && job.lastWindowsStatus.length > 0) {
@@ -1608,7 +1589,12 @@ function buildMonitorPage(): string {
 
             const errorHtml = diagnosticDetails.length > 0
               ? diagnosticDetails.join('')
-              : '<span class="job-meta">Sin errores registrados</span>';
+              : '<span class="job-meta">' +
+                (completed ? 'Trabajo completado' : 'Sin errores registrados') +
+                '</span>';
+            const windowsJobIdHtml = job.windowsJobId
+              ? '<span class="job-meta">Windows JobId: ' + escapeHtml(job.windowsJobId) + '</span>'
+              : '';
 
             return \`
               <tr>
@@ -1620,7 +1606,7 @@ function buildMonitorPage(): string {
                 <td>\${escapeHtml(job.printerName)}</td>
                 <td>
                   <span class="status status--\${escapeHtml(String(job.status).toLowerCase())}">\${escapeHtml(job.status)}</span>
-                  <span class="job-meta">Windows JobId: \${escapeHtml(job.windowsJobId ?? 'No disponible')}</span>
+                  \${windowsJobIdHtml}
                 </td>
                 <td>\${escapeHtml(formatDate(job.updatedAt))}</td>
                 <td>\${errorHtml}</td>
@@ -1663,6 +1649,13 @@ function buildMonitorPage(): string {
           const windowsStatus = Array.isArray(lastJob.lastWindowsStatus) && lastJob.lastWindowsStatus.length
             ? lastJob.lastWindowsStatus.join(', ')
             : 'Sin datos';
+          const windowsJobIdHtml = lastJob.windowsJobId
+            ? '<div><dt>Windows JobId</dt><dd>' + escapeHtml(lastJob.windowsJobId) + '</dd></div>'
+            : '';
+          const lastJobCompleted = lastJob.status === 'SPOOL_COMPLETED';
+          const lastError = lastJobCompleted
+            ? (printer.queue?.blockReason || 'Sin errores')
+            : (lastJob.errorMessage || printer.queue?.blockReason || 'Sin errores');
 
           return \`
             <article class="printer-row" data-printer="\${escapeHtml(printer.systemName)}" data-paper-width="\${escapeHtml(printer.paperWidth)}">
@@ -1675,12 +1668,13 @@ function buildMonitorPage(): string {
                 <div><dt>Transporte</dt><dd>\${escapeHtml(printer.transport)}</dd></div>
                 <div><dt>Cola local</dt><dd>\${escapeHtml(printer.queue?.pendingJobs ?? 0)}</dd></div>
                 <div><dt>Ultimo backend job</dt><dd>\${escapeHtml(lastJob.backendJobId || 'Local / sin datos')}</dd></div>
-                <div><dt>Windows JobId</dt><dd>\${escapeHtml(lastJob.windowsJobId ?? 'No disponible')}</dd></div>
+                \${windowsJobIdHtml}
                 <div><dt>Windows status</dt><dd>\${escapeHtml(windowsStatus)}</dd></div>
                 <div><dt>Duracion</dt><dd>\${escapeHtml(duration)}</dd></div>
-                <div><dt>Ultimo error</dt><dd class="\${lastJob.errorMessage ? 'error-text' : ''}">\${escapeHtml(lastJob.errorMessage || printer.queue?.blockReason || 'Sin errores')}</dd></div>
+                <div><dt>Ultimo error</dt><dd class="\${!lastJobCompleted && lastJob.errorMessage ? 'error-text' : ''}">\${escapeHtml(lastError)}</dd></div>
               </dl>
               <div class="printer-actions">
+                <button class="button button--primary" data-action="invoice" type="button">Probar factura</button>
                 <button class="button button--secondary" data-action="raw-minimal" type="button">Prueba RAW minima</button>
                 <button class="button button--secondary" data-action="driver" type="button">Prueba driver</button>
                 \${canQuery ? '<button class="button button--secondary" data-action="refresh-job" data-job-id="' + escapeHtml(lastJob.localJobId) + '" type="button">Consultar estado</button>' : ''}
@@ -1814,10 +1808,14 @@ function buildMonitorPage(): string {
         button.disabled = true;
 
         try {
-          if (action === 'raw-minimal') {
-            await postJson('/printing/diagnostics/raw-minimal', { printerName });
+          let diagnosticPayload = null;
+
+          if (action === 'invoice') {
+            diagnosticPayload = await postJson('/printing/diagnostics/invoice', { printerName });
+          } else if (action === 'raw-minimal') {
+            diagnosticPayload = await postJson('/printing/diagnostics/raw-minimal', { printerName });
           } else if (action === 'driver') {
-            await postJson('/printing/diagnostics/driver', { printerName });
+            diagnosticPayload = await postJson('/printing/diagnostics/driver', { printerName });
           } else if (action === 'refresh-job') {
             const localJobId = button.dataset.jobId;
             if (localJobId) {
@@ -1825,7 +1823,7 @@ function buildMonitorPage(): string {
             }
           } else if (action === 'cancel') {
             const localJobId = button.dataset.jobId;
-            if (localJobId && window.confirm('Cancelar exclusivamente este Windows JobId?')) {
+            if (localJobId && window.confirm('Cancelar exclusivamente este trabajo en Windows?')) {
               await postJson('/printing/jobs/' + encodeURIComponent(localJobId) + '/cancel');
             }
           } else if (action === 'unblock') {
@@ -1839,6 +1837,13 @@ function buildMonitorPage(): string {
               transport,
               paperWidth: row.dataset.paperWidth === '58mm' ? '58mm' : '80mm',
             });
+          }
+
+          if (diagnosticPayload) {
+            showTestPrintFeedback(
+              formatTestPrintFeedback(diagnosticPayload),
+              diagnosticPayload.success === true ? 'ok' : 'error',
+            );
           }
 
           await refresh();

@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { PrintExecutionResult } from '../contracts/print-result';
 import { PrinterProfileService } from '../printers/printer-profile.service';
 import { PrinterDiscoveryService } from '../printers/printer-discovery.service';
@@ -29,6 +30,7 @@ export class PrintDiagnosticsService {
   ) {}
 
   async runRawMinimal(printerName: string): Promise<PrintExecutionResult> {
+    await this.orchestrator.preparePrinterForManualTest(printerName);
     const rawData = Buffer.concat([
       Buffer.from([ESC, 0x40]),
       Buffer.from('GESTION AL DIA\nPRUEBA RAW\n1234567890\n\n\n', 'ascii'),
@@ -46,6 +48,7 @@ export class PrintDiagnosticsService {
   }
 
   async runRawFull(printerName: string): Promise<PrintExecutionResult> {
+    await this.orchestrator.preparePrinterForManualTest(printerName);
     const profile = this.profileService.resolveProfile(printerName);
     return this.orchestrator.execute({
       source: 'DIAGNOSTIC',
@@ -59,6 +62,7 @@ export class PrintDiagnosticsService {
   }
 
   async runDriver(printerName: string): Promise<PrintExecutionResult> {
+    await this.orchestrator.preparePrinterForManualTest(printerName);
     const profile = this.profileService.resolveProfile(printerName);
     const html = buildDriverDiagnosticHtml(printerName, profile.paperWidth);
     return this.orchestrator.execute({
@@ -69,6 +73,20 @@ export class PrintDiagnosticsService {
       documentName: 'PRUEBA-WINDOWS-DRIVER',
       copies: 1,
       transportOverride: 'WINDOWS_DRIVER',
+    });
+  }
+
+  async runInvoice(printerName: string): Promise<PrintExecutionResult> {
+    await this.orchestrator.preparePrinterForManualTest(printerName);
+    const profile = this.profileService.resolveProfile(printerName);
+    return this.orchestrator.execute({
+      source: 'DIAGNOSTIC',
+      jobType: 'RECEIPT',
+      payload: buildTestInvoicePayload(profile.paperWidth, printerName),
+      printerName,
+      documentName: 'FACTURA-PRUEBA',
+      copies: 1,
+      paperWidth: profile.paperWidth,
     });
   }
 
@@ -173,10 +191,73 @@ function buildDiagnosticPayload(paperWidth: '58mm' | '80mm'): ReceiptJobPayload 
   };
 }
 
+function buildTestInvoicePayload(
+  paperWidth: '58mm' | '80mm',
+  printerName: string,
+): ReceiptJobPayload {
+  const reference = crypto.randomUUID().slice(0, 8).toUpperCase();
+
+  return {
+    title: 'FACTURA DE PRUEBA',
+    business: {
+      name: 'Gestion al Dia Restaurante',
+      nit: '900123456-7',
+      address: 'Calle 123 # 45-67',
+      phone: '+57 300 123 4567',
+    },
+    order: {
+      id: `PRUEBA-${reference}`,
+      createdAt: new Date().toISOString(),
+      tableName: 'Mesa 10',
+      waiterName: 'Agente de impresion',
+    },
+    items: [
+      {
+        name: 'Cafe colombiano',
+        quantity: 2,
+        unitPrice: 5_000,
+        total: 10_000,
+      },
+      {
+        name: 'Almuerzo ejecutivo',
+        quantity: 1,
+        unitPrice: 32_000,
+        total: 32_000,
+        notes: 'Sin cebolla y con ensalada',
+      },
+      {
+        name: 'Postre de la casa',
+        quantity: 1,
+        unitPrice: 8_000,
+        total: 8_000,
+        notes: `Impresora: ${printerName}`,
+      },
+    ],
+    totals: {
+      subtotal: 50_000,
+      tax: 0,
+      discount: 5_000,
+      tip: 3_000,
+      total: 48_000,
+      paid: 50_000,
+      change: 2_000,
+    },
+    paymentMethod: 'Efectivo',
+    paymentBreakdown: [{ label: 'Efectivo', amount: 50_000 }],
+    options: {
+      copies: 1,
+      paperWidth,
+      cutPaper: true,
+      openCashDrawer: false,
+      showTotals: true,
+      showItemPrices: true,
+    },
+  };
+}
+
 function buildDriverDiagnosticHtml(
   printerName: string,
   paperWidth: '58mm' | '80mm',
 ): string {
   return `<!doctype html><html lang="es"><head><meta charset="utf-8"><title>PRUEBA-WINDOWS-DRIVER</title><style>@page{margin:0}body{width:${paperWidth};margin:0;padding:2mm;font:13px/1.4 "Courier New",monospace;text-align:center;color:#000;background:#fff}h1{font-size:16px;margin:0 0 3mm}p{margin:1mm 0}</style></head><body><h1>GESTION AL DIA</h1><p>PRUEBA WINDOWS DRIVER</p><p>${escapeHtml(printerName)}</p><p>1234567890</p></body></html>`;
 }
-

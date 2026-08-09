@@ -63,10 +63,6 @@ export function mapWindowsJobStatus(
     return result('CANCELLED', statusNumber, labels, 'WINDOWS_JOB_DELETED', retrySafety);
   }
 
-  if (has(WINDOWS_JOB_STATUS.ERROR, 'ERROR')) {
-    return result('FAILED', statusNumber, labels, 'WINDOWS_JOB_ERROR', retrySafety);
-  }
-
   if (has(WINDOWS_JOB_STATUS.OFFLINE, 'OFFLINE')) {
     return result('STUCK', statusNumber, labels, 'PRINTER_OFFLINE', retrySafety);
   }
@@ -87,10 +83,6 @@ export function mapWindowsJobStatus(
     return result('STUCK', statusNumber, labels, 'WINDOWS_JOB_PAUSED', retrySafety);
   }
 
-  if (has(WINDOWS_JOB_STATUS.RETAINED, 'RETAINED')) {
-    return result('STUCK', statusNumber, labels, 'WINDOWS_JOB_RETAINED', retrySafety);
-  }
-
   if (has(WINDOWS_JOB_STATUS.PRINTED, 'PRINTED')) {
     return result('SPOOL_COMPLETED', statusNumber, labels, undefined, retrySafety);
   }
@@ -107,6 +99,28 @@ export function mapWindowsJobStatus(
       message:
         'Windows envio el trabajo al dispositivo, pero COMPLETE no confirma salida fisica.',
     };
+  }
+
+  if (has(WINDOWS_JOB_STATUS.RETAINED, 'RETAINED')) {
+    const retainedWithError = has(WINDOWS_JOB_STATUS.ERROR, 'ERROR');
+    return {
+      ...result(
+        'SPOOL_COMPLETED',
+        statusNumber,
+        labels,
+        retainedWithError
+          ? 'WINDOWS_JOB_RETAINED_WITH_ERROR_FLAG'
+          : 'WINDOWS_JOB_RETAINED_AFTER_PRINT',
+        retrySafety,
+      ),
+      message: retainedWithError
+        ? 'Windows conservo el trabajo despues de imprimirlo; se ignora el indicador generico ERROR porque el trabajo ya fue retenido.'
+        : 'Windows conservo el trabajo en la cola despues de imprimirlo.',
+    };
+  }
+
+  if (has(WINDOWS_JOB_STATUS.ERROR, 'ERROR')) {
+    return result('FAILED', statusNumber, labels, 'WINDOWS_JOB_ERROR', retrySafety);
   }
 
   if (has(WINDOWS_JOB_STATUS.DELETING, 'DELETING')) {

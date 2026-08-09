@@ -33,13 +33,36 @@ export class SpoolJobMonitorService {
     } = {},
   ): Promise<PrintTransportJobStatus> {
     if (!job.systemJobId) {
-      const status = await transport.getJobStatus(job);
-      options.onStatus?.(status, 0);
-      return {
-        ...status,
-        state: 'UNKNOWN',
+      try {
+        const status = await transport.getJobStatus(job);
+        options.onStatus?.(status, 0);
+
+        if (
+          status.state === 'SPOOL_COMPLETED' ||
+          status.state === 'FAILED' ||
+          status.state === 'STUCK' ||
+          status.state === 'CANCELLED'
+        ) {
+          return status;
+        }
+      } catch (error) {
+        this.logger.warn('No fue posible consultar un trabajo aceptado sin JobId.', {
+          printerName: job.printerName,
+          documentName: job.documentName,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+
+      const acceptedStatus: PrintTransportJobStatus = {
+        state: 'SPOOL_COMPLETED',
+        observed: false,
+        code: 'WINDOWS_JOB_ID_UNAVAILABLE_ACCEPTED',
+        message:
+          'Windows acepto el trabajo, pero no entrego un JobId para seguirlo. El agente continua sin bloquear la impresora.',
         retrySafety: 'UNSAFE_TO_RETRY',
       };
+      options.onStatus?.(acceptedStatus, 0);
+      return acceptedStatus;
     }
 
     const startedAt = this.now();
@@ -122,4 +145,3 @@ function wait(milliseconds: number): Promise<void> {
     timeout.unref?.();
   });
 }
-
