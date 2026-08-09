@@ -18,7 +18,7 @@ test('rejects a Windows package that omits the printer runtime', async () => {
   }
 });
 
-test('accepts a Windows package with the wrapper and native binary unpacked', async () => {
+test('materializes a missing wrapper after rebuild and accepts the Windows package', async () => {
   const appOutDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gad-printer-package-'));
   const packageRoot = path.join(
     appOutDir,
@@ -27,17 +27,30 @@ test('accepts a Windows package with the wrapper and native binary unpacked', as
   );
 
   try {
-    fs.mkdirSync(path.join(packageRoot, 'lib'), { recursive: true });
     fs.mkdirSync(path.join(packageRoot, 'build', 'Release'), { recursive: true });
     fs.writeFileSync(path.join(packageRoot, 'package.json'), '{}');
-    fs.writeFileSync(path.join(packageRoot, 'lib', 'printer.js'), 'module.exports = {};');
     fs.writeFileSync(
       path.join(packageRoot, 'build', 'Release', 'node_printer.node'),
       'native-placeholder',
     );
+    assert.equal(fs.existsSync(path.join(packageRoot, 'lib', 'printer.js')), false);
 
     await assert.doesNotReject(
       verifyPackagedPrinter({ electronPlatformName: 'win32', appOutDir }),
+    );
+    assert.equal(
+      fs.readFileSync(path.join(packageRoot, 'lib', 'printer.js'), 'utf8'),
+      fs.readFileSync(
+        path.join(
+          __dirname,
+          '..',
+          'resources',
+          'printer-runtime',
+          'lib',
+          'printer.js',
+        ),
+        'utf8',
+      ),
     );
   } finally {
     fs.rmSync(appOutDir, { recursive: true, force: true });

@@ -12,6 +12,22 @@ exports.default = async function verifyPackagedPrinter(context) {
     'printer-runtime',
   );
   const modulePath = path.join(packageRoot, 'lib', 'printer.js');
+  const wrapperSourcePath = path.join(
+    __dirname,
+    '..',
+    'resources',
+    'printer-runtime',
+    'lib',
+    'printer.js',
+  );
+
+  if (!fs.existsSync(wrapperSourcePath)) {
+    throw new Error(`No existe el wrapper WinSpool versionado: ${wrapperSourcePath}`);
+  }
+
+  fs.mkdirSync(path.dirname(modulePath), { recursive: true });
+  fs.copyFileSync(wrapperSourcePath, modulePath);
+
   const binaryCandidates = [
     path.join(packageRoot, 'build', 'Release', 'node_printer.node'),
     path.join(packageRoot, 'lib', 'node_printer.node'),

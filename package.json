@@ -64,7 +64,7 @@
         "to": "printer-runtime",
         "filter": [
           "package.json",
-          "lib/**/*",
+          "lib/node_printer.node",
           "build/Release/node_printer.node"
         ]
       }

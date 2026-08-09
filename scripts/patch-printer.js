@@ -20,6 +20,14 @@ const printerBuildReleaseBinary = path.join(
 const printerLibBinary = path.join(printerLibDirectory, 'node_printer.node');
 const printerLibIndex = path.join(printerLibDirectory, 'index.js');
 const printerLibPrinter = path.join(printerLibDirectory, 'printer.js');
+const printerRuntimeWrapperSource = path.join(
+  __dirname,
+  '..',
+  'resources',
+  'printer-runtime',
+  'lib',
+  'printer.js',
+);
 
 if (!fs.existsSync(printerPackageRoot)) {
   console.log('[patch-printer] printer no esta instalado. No hay nada para parchear.');
@@ -77,77 +85,12 @@ function ensureLibRuntimeFiles() {
   }
   fs.writeFileSync(printerLibIndex, "module.exports = require('./printer');\n", 'utf8');
 
-  fs.writeFileSync(
-    printerLibPrinter,
-    [
-      'const fs = require("node:fs");',
-      'const path = require("node:path");',
-      '',
-      'const binaryCandidates = [',
-      '  path.join(__dirname, "..", "build", "Release", "node_printer.node"),',
-      '  path.join(__dirname, "node_printer.node"),',
-      '];',
-      'const binaryPath = binaryCandidates.find((candidate) => fs.existsSync(candidate));',
-      '',
-      'if (!binaryPath) {',
-      '  throw new Error(`No se encontro node_printer.node. Rutas revisadas: ${binaryCandidates.join(", ")}`);',
-      '}',
-      '',
-      'const nativePrinter = require(binaryPath);',
-      '',
-      'function printDirect(options) {',
-      '  if (!options || typeof options !== "object") {',
-      '    throw new Error("printDirect requiere un objeto de opciones.");',
-      '  }',
-      '',
-      '  const printerName =',
-      '    typeof options.printer === "string" && options.printer.trim()',
-      '      ? options.printer.trim()',
-      '      : nativePrinter.getDefaultPrinterName();',
-      '  const docname =',
-      '    typeof options.docname === "string" && options.docname.trim()',
-      '      ? options.docname.trim()',
-      '      : "Gestion al Dia Print Agent";',
-      '  const type =',
-      '    typeof options.type === "string" && options.type.trim()',
-      '      ? options.type.trim()',
-      '      : "RAW";',
-      '',
-      '  try {',
-      '    const jobId = nativePrinter.printDirect(',
-      '      options.data,',
-      '      printerName,',
-      '      docname,',
-      '      type,',
-      '      options.options || {},',
-      '    );',
-      '',
-      '    if (typeof options.success === "function") {',
-      '      options.success(jobId);',
-      '    }',
-      '',
-      '    return jobId;',
-      '  } catch (error) {',
-      '    if (typeof options.error === "function") {',
-      '      options.error(error);',
-      '      return null;',
-      '    }',
-      '',
-      '    throw error;',
-      '  }',
-      '}',
-      '',
-      'module.exports = {',
-      '  ...nativePrinter,',
-      '  printDirect,',
-      '  __gestionAlDiaModuleInfo: {',
-      '    modulePath: __filename,',
-      '    binaryPath,',
-      '    mode: "package-wrapper",',
-      '  },',
-      '};',
-    ].join('\n') + '\n',
-    'utf8',
-  );
-  console.log('[patch-printer] Actualizado lib/printer.js.');
+  if (!fs.existsSync(printerRuntimeWrapperSource)) {
+    throw new Error(
+      `[patch-printer] No existe el wrapper versionado: ${printerRuntimeWrapperSource}`,
+    );
+  }
+
+  fs.copyFileSync(printerRuntimeWrapperSource, printerLibPrinter);
+  console.log('[patch-printer] Copiado el wrapper versionado hacia lib/printer.js.');
 }
