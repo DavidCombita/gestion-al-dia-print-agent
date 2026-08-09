@@ -18,10 +18,19 @@ Agente local para Windows que permite a la app web de Gestion al Dia imprimir di
 - `GET /config`
 - `GET /jobs`
 - `GET /monitor`
+- `GET /printing/status`
+- `GET /printing/diagnostics/export`
 - `POST /config`
 - `POST /print/test`
 - `POST /print/invoice`
 - `POST /print/kitchen-order`
+- `POST /printing/printers/profile`
+- `POST /printing/printers/unblock`
+- `POST /printing/diagnostics/raw-minimal`
+- `POST /printing/diagnostics/raw-full`
+- `POST /printing/diagnostics/driver`
+- `POST /printing/jobs/:localJobId/refresh`
+- `POST /printing/jobs/:localJobId/cancel`
 
 Todos escuchan solo en `127.0.0.1:3088`.
 
@@ -34,6 +43,12 @@ Print desde conexión segura.
 Flujo general
 
 ![alt text](docs/image-flujo-principal.png)
+
+## Documentacion interna
+
+- [`electron-main.ts`](docs/electron-main.md): entrypoint de Electron, arranque del agente, watchdog, reinicios y handlers del proceso principal.
+- [Pipeline de impresion Windows](docs/windows-printing-pipeline.md): arquitectura, estados, RAW vs DRIVER, recuperacion, diagnostico y limitaciones.
+- [Checklist de aceptacion Windows](docs/windows-printing-acceptance-checklist.md): pruebas manuales con POS-80C y escenarios de falla.
 
 ## Seguridad
 
@@ -52,6 +67,9 @@ El agente guarda un `config.json` en el directorio `userData` de Electron con:
 - copias por tipo
 - activacion de factura/comanda
 - ancho de papel
+- perfil, transporte y columnas por impresora
+- intervalos y timeout de monitoreo del spooler
+- limite de cola por impresora
 - token de emparejamiento
 - origenes CORS permitidos
 
@@ -60,7 +78,8 @@ Adicionalmente guarda un historial local `print-history.json` con los ultimos tr
 ## Monitor local
 
 - Desde el icono de la bandeja puedes abrir `Ver historial de impresiones`.
-- El monitor muestra el estado del servicio, la cola activa y los ultimos trabajos enviados.
+- El monitor muestra perfiles, colas por impresora, JobId, estado Win32, duracion, errores e historial.
+- Incluye pruebas RAW minima/DRIVER, cambio manual de transporte, cancelacion de un JobId y desbloqueo consciente.
 - La vista local tambien queda disponible en `http://127.0.0.1:3088/monitor`.
 
 ## Flujo de build
@@ -144,10 +163,14 @@ Solo necesitas cambiar el repo de releases en `publish` si quieres separarlo del
 
 Si quieres una experiencia mas visible para el usuario, el siguiente paso es agregar una opcion en la bandeja para `Buscar actualizaciones ahora` y otra para `Reiniciar e instalar`.
 
-## Nota sobre impresion RAW
+## Nota sobre impresion Windows
 
-El proyecto usa el modulo `printer` para listar impresoras y enviar bytes ESC/POS al spooler de Windows por nombre de impresora. Como es un modulo nativo y ademas es una dependencia vieja, debes:
+El proyecto permite `WINDOWS_RAW` y `WINDOWS_DRIVER` por perfil. RAW usa el modulo `printer` dentro de un `utilityProcess` para enviar ESC/POS y conservar Windows JobId. DRIVER usa el renderizado de Electron y la configuracion de rollo del driver. No hay fallback automatico entre ambos.
+
+Como `printer` es un modulo nativo antiguo, debes:
 
 - instalar y empaquetar el agente directamente en Windows
 - preferir Node 22
 - usar `npm install --legacy-peer-deps` si aparece conflicto de peer dependencies al instalar
+
+`SPOOL_COMPLETED` significa que Windows dejo de tener el trabajo pendiente sin detectar error; no garantiza por si solo que el papel salio fisicamente.

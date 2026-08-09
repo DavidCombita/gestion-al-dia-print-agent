@@ -1,3 +1,9 @@
+import type { PrinterProfile } from '../printing/contracts/printer-profile';
+import type {
+  PrintJobRecord,
+  PrintExecutionResult,
+} from '../printing/contracts/print-result';
+
 export type PaperWidth = '58mm' | '80mm';
 
 export interface AgentHealthResponse {
@@ -27,13 +33,20 @@ export interface AgentHealthResponse {
     pendingJobs: number;
     isProcessing: boolean;
     activeJobLabel?: string;
+    printers?: Array<{
+      printerName: string;
+      pendingJobs: number;
+      isProcessing: boolean;
+      health: 'HEALTHY' | 'BLOCKED';
+      blockReason?: string;
+    }>;
   };
 }
 
 export interface PrinterDescriptor {
   name: string;
   isDefault: boolean;
-  status: 'ready' | 'offline' | 'unknown';
+  status: 'ready' | 'offline' | 'error' | 'unknown';
 }
 
 export interface AgentPrinterConfig {
@@ -50,6 +63,10 @@ export interface AgentPrinterConfig {
   backendAgentId: string | null;
   backendBusinessId: string | null;
   backendDeviceToken: string | null;
+  printerProfiles: PrinterProfile[];
+  printJobPollIntervalMs: number;
+  printJobCompletionTimeoutMs: number;
+  maxPendingPrintJobsPerPrinter: number;
 }
 
 export interface BusinessPrintPayload {
@@ -92,6 +109,7 @@ export interface PaymentBreakdownPrintPayload {
 export interface PrintOptionsPayload {
   copies?: number;
   paperWidth?: PaperWidth;
+  charactersPerLine?: number;
   cutPaper?: boolean;
   openCashDrawer?: boolean;
   showTotals?: boolean;
@@ -156,18 +174,8 @@ export interface AgentMutationResponse {
   message: string;
 }
 
-export type PrintJobStatus = 'queued' | 'processing' | 'completed' | 'failed';
-
-export interface PrintJobRecord {
-  id: string;
-  label: string;
-  printerName: string;
-  status: PrintJobStatus;
-  createdAt: string;
-  updatedAt: string;
-  errorMessage?: string;
-}
-
 export interface PrintJobsResponse {
   jobs: PrintJobRecord[];
 }
+
+export type { PrintExecutionResult, PrintJobRecord };

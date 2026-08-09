@@ -22,7 +22,10 @@ export function buildEscPosDocument(
   options: EscPosDocumentOptions,
 ): Buffer {
   const paperWidth = payload.options?.paperWidth ?? '80mm';
-  const columns = paperWidth === '58mm' ? 32 : 48;
+  const columns = resolveColumns(
+    payload.options?.charactersPerLine,
+    paperWidth === '58mm' ? 32 : 48,
+  );
   const shouldShowItemPrices =
     options.showItemPrices ?? payload.options?.showItemPrices ?? true;
   const chunks: Buffer[] = [
@@ -119,7 +122,10 @@ export function buildEscPosDocument(
 
 export function buildEscPosReport(payload: ThermalReportJobPayload): Buffer {
   const paperWidth = payload.options?.paperWidth ?? '80mm';
-  const columns = paperWidth === '58mm' ? 32 : 48;
+  const columns = resolveColumns(
+    payload.options?.charactersPerLine,
+    paperWidth === '58mm' ? 32 : 48,
+  );
   const chunks: Buffer[] = [
     command(ESC, 0x40),
     command(ESC, 0x74, CODE_PAGE_CP850),
@@ -368,6 +374,14 @@ function wrapText(value: string, width: number): string[] {
 
 function divider(columns: number): string {
   return '-'.repeat(columns);
+}
+
+function resolveColumns(value: number | undefined, fallback: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return fallback;
+  }
+
+  return Math.min(80, Math.max(16, Math.trunc(value)));
 }
 
 function formatQuantity(value: number): string {

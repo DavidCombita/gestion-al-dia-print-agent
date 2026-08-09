@@ -1,10 +1,9 @@
 import { io, Socket } from 'socket.io-client';
 import { AppConfigService } from '../config/app-config.service';
 import { LoggerService } from '../logs/logger.service';
-import { PrintHistoryService } from '../printing/print-history.service';
-import { PrintQueueService } from '../printing/print-queue.service';
-import { PrinterService } from '../printing/printer.service';
-import { formatBackendPrintJob } from '../printing/strategies/print-format-strategy.registry';
+import { PrintExecutionResult } from '../printing/contracts/print-result';
+import { PrintOrchestratorService } from '../printing/print-orchestrator.service';
+import { PrinterDiscoveryService } from '../printing/printers/printer-discovery.service';
 import {
   BackendPrintPayload,
   BackendPrintJobType,
@@ -67,7 +66,7 @@ export interface BackendRuntimeStatusSnapshot {
 
 class BackendAgentAuthExpiredError extends Error {
   constructor(readonly statusCode: 401 | 403) {
-    super(`Backend respondió ${statusCode}`);
+    super(`Backend respondio ${statusCode}`);
     this.name = 'BackendAgentAuthExpiredError';
   }
 }
@@ -76,9 +75,8 @@ export interface BackendPrintClientDependencies {
   version: string;
   configService: AppConfigService;
   logger: LoggerService;
-  printerService: PrinterService;
-  queueService: PrintQueueService;
-  printHistoryService: PrintHistoryService;
+  printerDiscoveryService: PrinterDiscoveryService;
+  printOrchestrator: PrintOrchestratorService;
   notify?: (title: string, content: string) => void;
 }
 
@@ -88,7 +86,6 @@ const HEARTBEAT_INTERVAL_MS = 25_000;
 const POLLING_INTERVAL_MS = 7_000;
 const BACKEND_REQUEST_TIMEOUT_MS = 20_000;
 const PRINTED_ACK_ATTEMPTS = 3;
-const SPOOL_WATCHDOG_DELAY_MS = 45_000;
 
 export class BackendPrintClientService {
   private socket: Socket | null = null;
@@ -101,7 +98,7 @@ export class BackendPrintClientService {
   private lastErrorSnapshot: BackendRuntimeErrorSnapshot | null = null;
   private lastDisconnectReason: string | null = null;
 
-  constructor(private readonly dependencies: BackendPrintClientDependencies) {}
+  constructor(readonly dependencies: BackendPrintClientDependencies) {}
 
   start(): void {
     this.stop();
@@ -113,7 +110,6 @@ export class BackendPrintClientService {
     }
 
     this.authExpiredHandled = false;
-
     this.connectSocket();
     void this.sendHeartbeat();
     void this.syncPrinters();
@@ -147,9 +143,8 @@ export class BackendPrintClientService {
   }
 
   async register(pairingCode: string): Promise<RegisterBackendAgentResponse> {
-    const baseUrl = this.resolveBaseUrl();
     const response = await this.request<RegisterBackendAgentResponse>(
-      baseUrl,
+      this.resolveBaseUrl(),
       '/print-agents/register',
       {
         method: 'POST',
@@ -176,14 +171,13 @@ export class BackendPrintClientService {
   }
 
   async syncPrintersNow(): Promise<SyncBackendPrintersResponse> {
-    const config = this.dependencies.configService.getConfig();
-    const token = config.backendDeviceToken;
+    const token = this.dependencies.configService.getConfig().backendDeviceToken;
 
     if (!token) {
       throw new Error('El agente todavia no esta vinculado con Gestion al Dia.');
     }
 
-    const printers = await this.dependencies.printerService.listPrinters();
+    const printers = await this.dependencies.printerDiscoveryService.listPrinters();
     const response = await this.request<SyncBackendPrintersResponse>(
       this.resolveBaseUrl(),
       '/print-agents/printers/sync',
@@ -204,13 +198,11 @@ export class BackendPrintClientService {
       synced: response.synced,
     });
     this.recordSuccessfulContact();
-
     return response;
   }
 
   private connectSocket(): void {
-    const config = this.dependencies.configService.getConfig();
-    const token = config.backendDeviceToken;
+    const token = this.dependencies.configService.getConfig().backendDeviceToken;
 
     if (!token) {
       return;
@@ -236,12 +228,11 @@ export class BackendPrintClientService {
     });
     this.socket.on('connect_error', (error) => {
       this.isSocketConnected = false;
-      this.recordBackendError(
-        error instanceof Error ? error.message : String(error),
+      this.recordBackendError(error instanceof Error ? error.message : String(error));
+      this.dependencies.logger.warn(
+        'Fallo la autenticacion o conexion del WebSocket de impresion.',
+        { error: error instanceof Error ? error.message : String(error) },
       );
-      this.dependencies.logger.warn('Fallo la autenticacion o conexion del WebSocket de impresion.', {
-        error: error instanceof Error ? error.message : String(error),
-      });
     });
     this.socket.on('print-job.created', () => {
       void this.processNextPending();
@@ -254,27 +245,26 @@ export class BackendPrintClientService {
   }
 
   private async sendHeartbeat(): Promise<void> {
-    const config = this.dependencies.configService.getConfig();
-    const token = config.backendDeviceToken;
+    const token = this.dependencies.configService.getConfig().backendDeviceToken;
 
     if (!token) {
       return;
     }
 
     try {
-      await this.request(this.resolveBaseUrl(), '/print-agents/heartbeat', {
-        method: 'POST',
-        body: { version: this.dependencies.version },
-      }, token);
+      await this.request(
+        this.resolveBaseUrl(),
+        '/print-agents/heartbeat',
+        { method: 'POST', body: { version: this.dependencies.version } },
+        token,
+      );
       this.recordSuccessfulContact();
     } catch (error) {
       if (error instanceof BackendAgentAuthExpiredError) {
         return;
       }
 
-      this.recordBackendError(
-        error instanceof Error ? error.message : String(error),
-      );
+      this.recordBackendError(this.errorMessage(error));
       this.dependencies.logger.warn('No fue posible enviar heartbeat al backend.', error);
     }
   }
@@ -287,10 +277,11 @@ export class BackendPrintClientService {
         return;
       }
 
-      this.recordBackendError(
-        error instanceof Error ? error.message : String(error),
+      this.recordBackendError(this.errorMessage(error));
+      this.dependencies.logger.warn(
+        'No fue posible sincronizar impresoras con backend.',
+        error,
       );
-      this.dependencies.logger.warn('No fue posible sincronizar impresoras con backend.', error);
     }
   }
 
@@ -299,8 +290,7 @@ export class BackendPrintClientService {
       return;
     }
 
-    const config = this.dependencies.configService.getConfig();
-    const token = config.backendDeviceToken;
+    const token = this.dependencies.configService.getConfig().backendDeviceToken;
 
     if (!token) {
       return;
@@ -329,13 +319,14 @@ export class BackendPrintClientService {
         );
 
         this.dependencies.logger.info('Trabajo de impresion backend reclamado.', {
-          jobId: claimedJob.id,
-          type: claimedJob.type,
-          printerName: claimedJob.printer.systemName || claimedJob.printer.name,
+          backendJobId: claimedJob.id,
+          jobType: claimedJob.type,
+          printerName:
+            claimedJob.printer.systemName || claimedJob.printer.name,
         });
 
-        const printed = await this.printClaimedJob(claimedJob, token);
-        if (!printed) {
+        const completed = await this.printClaimedJob(claimedJob, token);
+        if (!completed) {
           return;
         }
       }
@@ -344,61 +335,30 @@ export class BackendPrintClientService {
         return;
       }
 
-      this.recordBackendError(
-        error instanceof Error ? error.message : String(error),
+      this.recordBackendError(this.errorMessage(error));
+      this.dependencies.logger.warn(
+        'No fue posible procesar trabajos pendientes del backend.',
+        error,
       );
-      this.dependencies.logger.warn('No fue posible procesar trabajos pendientes del backend.', error);
     } finally {
       this.isProcessing = false;
     }
   }
 
-  private async printClaimedJob(job: BackendPrintJob, token: string): Promise<boolean> {
+  private async printClaimedJob(
+    job: BackendPrintJob,
+    token: string,
+  ): Promise<boolean> {
     const baseUrl = this.resolveBaseUrl();
     const printerName = job.printer.systemName || job.printer.name;
-    let payload: BackendPrintPayload;
-    let copies = 1;
-    let buffer: Buffer;
 
     try {
-      payload = this.normalizePayload(job);
-      copies = Math.max(1, Math.min(5, Math.trunc(payload.options?.copies ?? job.printer.copies ?? 1)));
-      buffer = this.formatJob(job.type, payload);
-    } catch (error) {
-      await this.reportPrintJobFailed(baseUrl, token, job, error, {
-        stage: 'FORMAT_FAILED',
-        code: 'FORMAT_FAILED',
-        metadata: {
-          printerName,
-        },
-      });
-      return false;
-    }
-
-    await this.recordPrintJobEvent(token, job, {
-      stage: 'FORMAT_COMPLETED',
-      metadata: {
-        printerName,
-        copies,
-        paperWidth: payload.options?.paperWidth,
-        escposBytes: buffer.length,
-        showTotals: payload.options?.showTotals,
-        showItemPrices: payload.options?.showItemPrices,
-      },
-    });
-
-    try {
-      await this.request(baseUrl, `/print-jobs/${encodeURIComponent(job.id)}/printing`, { method: 'POST' }, token);
-      await this.recordPrintJobEvent(token, job, {
-        stage: 'BACKEND_PRINTING_MARKED',
-        metadata: {
-          printerName,
-        },
-      });
-      this.dependencies.logger.info('Trabajo marcado como imprimiendo en backend.', {
-        jobId: job.id,
-        printerName,
-      });
+      await this.request(
+        baseUrl,
+        `/print-jobs/${encodeURIComponent(job.id)}/printing`,
+        { method: 'POST' },
+        token,
+      );
     } catch (error) {
       if (error instanceof BackendAgentAuthExpiredError) {
         throw error;
@@ -407,149 +367,113 @@ export class BackendPrintClientService {
       await this.reportPrintJobFailed(baseUrl, token, job, error, {
         stage: 'BACKEND_MARK_PRINTING_FAILED',
         code: 'BACKEND_MARK_PRINTING_FAILED',
-        metadata: {
-          printerName,
-        },
       });
       return false;
     }
 
-    let acceptedCopies = 0;
+    let result: PrintExecutionResult;
 
     try {
-      for (let index = 0; index < copies; index += 1) {
-        const label = copies > 1 ? `${job.type}-${job.id}-${index + 1}` : `${job.type}-${job.id}`;
-        const historyId = this.dependencies.printHistoryService.recordQueued(label, printerName);
-        const copyNumber = index + 1;
-        await this.recordPrintJobEvent(token, job, {
-          stage: 'SPOOL_START',
-          metadata: {
-            printerName,
-            label,
-            copyNumber,
-            copies,
-            escposBytes: buffer.length,
-          },
-        });
-        await this.dependencies.queueService.enqueue(label, async () => {
-          this.dependencies.printHistoryService.markProcessing(historyId);
-          try {
-            await this.dependencies.printerService.printRaw(printerName, label, buffer);
-            acceptedCopies += 1;
-            this.dependencies.printHistoryService.markCompleted(historyId);
-            await this.recordPrintJobEvent(token, job, {
-              stage: 'SPOOL_ACCEPTED',
-              metadata: {
-                printerName,
-                label,
-                copyNumber,
-                copies,
-                escposBytes: buffer.length,
-              },
-            });
-            this.scheduleSpoolWatchdog(token, job, {
-              printerName,
-              label,
-              copyNumber,
-              copies,
-            });
-          } catch (error) {
-            this.dependencies.printHistoryService.markFailed(historyId, error);
-            await this.recordPrintJobEvent(token, job, {
-              level: 'ERROR',
-              stage: 'SPOOL_FAILED',
-              code: this.mapPrintError(error),
-              message: this.errorMessage(error),
-              metadata: {
-                printerName,
-                label,
-                copyNumber,
-                copies,
-                acceptedCopies,
-              },
-            });
-            throw error;
-          }
-        });
-      }
-    } catch (error) {
-      if (error instanceof BackendAgentAuthExpiredError) {
-        throw error;
-      }
-
-      this.dependencies.logger.warn('Trabajo de impresion backend fallido.', {
-        jobId: job.id,
+      result = await this.dependencies.printOrchestrator.execute({
+        source: 'BACKEND',
+        backendJobId: job.id,
+        jobType: job.type,
+        payload: job.payload,
         printerName,
-        error: error instanceof Error ? error.message : String(error),
+        displayPrinterName: job.printer.name,
+        copies: job.payload.options?.copies ?? job.printer.copies,
+        paperWidth: job.printer.paperWidth === 58 ? '58mm' : '80mm',
       });
-      this.recordBackendError(
-        error instanceof Error ? error.message : String(error),
-      );
-
-      if (acceptedCopies > 0) {
-        await this.recordPrintJobEvent(token, job, {
-          level: 'WARN',
-          stage: 'SPOOL_PARTIAL_FAILURE',
-          code: 'SPOOL_PARTIAL_FAILURE',
-          message:
-            'Windows acepto al menos una copia antes del error. Verifica el papel antes de reintentar.',
-          metadata: {
-            printerName,
-            acceptedCopies,
-            copies,
-          },
-        });
-        return false;
-      }
-
+    } catch (error) {
       await this.reportPrintJobFailed(baseUrl, token, job, error, {
-        stage: 'PRINT_FAILED',
+        stage: 'PRINT_ORCHESTRATION_FAILED',
+      });
+      return false;
+    }
+
+    await this.recordExecutionResult(token, job, result);
+
+    if (result.status === 'SPOOL_COMPLETED') {
+      return this.markPrintedInBackendWithRetry(baseUrl, token, job, {
+        printerName,
+        transport: result.transport,
+        copies: result.copies,
+        localJobIds: result.attempts.map((attempt) => attempt.localJobId),
+        windowsJobIds: result.attempts
+          .map((attempt) => attempt.systemJobId)
+          .filter((jobId): jobId is number => typeof jobId === 'number'),
+      });
+    }
+
+    const anySubmitted = result.attempts.some((attempt) => attempt.submitted);
+
+    if (!anySubmitted && result.retrySafety === 'SAFE_TO_RETRY') {
+      const firstFailure = result.attempts[0];
+      await this.reportPrintJobFailed(
+        baseUrl,
+        token,
+        job,
+        new Error(firstFailure?.errorMessage ?? 'La impresion fallo antes del submit.'),
+        {
+          stage: 'PRINT_FAILED_BEFORE_SUBMIT',
+          code: firstFailure?.errorCode,
+          metadata: { resultStatus: result.status },
+        },
+      );
+      return false;
+    }
+
+    await this.recordPrintJobEvent(token, job, {
+      level: 'WARN',
+      stage: 'PRINT_UNRESOLVED_UNSAFE_TO_RETRY',
+      code:
+        result.status === 'PARTIAL_FAILURE'
+          ? 'PARTIAL_FAILURE'
+          : `PRINT_${result.status}`,
+      message:
+        'Windows acepto al menos un trabajo sin confirmacion segura. No se reintentara automaticamente para evitar duplicados.',
+      metadata: {
+        resultStatus: result.status,
+        retrySafety: result.retrySafety,
+        printerName,
+        transport: result.transport,
+      },
+    });
+    return false;
+  }
+
+  private async recordExecutionResult(
+    token: string,
+    job: BackendPrintJob,
+    result: PrintExecutionResult,
+  ): Promise<void> {
+    for (const attempt of result.attempts) {
+      await this.recordPrintJobEvent(token, job, {
+        level:
+          attempt.status === 'SPOOL_COMPLETED'
+            ? 'INFO'
+            : attempt.status === 'FAILED'
+              ? 'ERROR'
+              : 'WARN',
+        stage: `LOCAL_${attempt.status}`,
+        code: attempt.errorCode,
+        message: attempt.errorMessage,
         metadata: {
-          printerName,
-          copies,
+          localJobId: attempt.localJobId,
+          attemptId: attempt.attemptId,
+          copyNumber: attempt.copyNumber,
+          copies: result.copies,
+          transport: attempt.transport,
+          printerName: attempt.printerName,
+          windowsJobId: attempt.systemJobId,
+          payloadBytes: attempt.payloadBytes,
+          retrySafety: attempt.retrySafety,
+          windowsStatus: attempt.lastWindowsStatus,
+          windowsStatusNumber: attempt.lastWindowsStatusNumber,
+          elapsedMs: attempt.elapsedMs,
         },
       });
-      return false;
     }
-
-    const markedPrinted = await this.markPrintedInBackendWithRetry(
-      baseUrl,
-      token,
-      job,
-      {
-        printerName,
-        copies,
-        acceptedCopies,
-      },
-    );
-
-    if (!markedPrinted) {
-      return false;
-    }
-
-    this.dependencies.logger.info('Trabajo marcado como impreso en backend.', {
-      jobId: job.id,
-      printerName,
-      copies,
-    });
-    this.recordSuccessfulContact();
-    return true;
-  }
-
-  private normalizePayload(job: BackendPrintJob): BackendPrintPayload {
-    return {
-      ...job.payload,
-      options: {
-        ...job.payload.options,
-        paperWidth:
-          job.payload.options?.paperWidth ?? (job.printer.paperWidth === 58 ? '58mm' : '80mm'),
-        copies: job.payload.options?.copies ?? job.printer.copies,
-      },
-    };
-  }
-
-  private formatJob(type: BackendPrintJob['type'], payload: BackendPrintPayload): Buffer {
-    return formatBackendPrintJob(type, payload);
   }
 
   private async markPrintedInBackendWithRetry(
@@ -570,35 +494,25 @@ export class BackendPrintClientService {
         );
         await this.recordPrintJobEvent(token, job, {
           stage: 'BACKEND_PRINTED_MARKED',
-          metadata: {
-            ...metadata,
-            ackAttempt: attempt,
-          },
+          metadata: { ...metadata, ackAttempt: attempt },
         });
+        this.recordSuccessfulContact();
         return true;
       } catch (error) {
         if (error instanceof BackendAgentAuthExpiredError) {
           throw error;
         }
-
         lastError = error;
       }
     }
 
     this.recordBackendError(this.errorMessage(lastError));
-    this.dependencies.logger.warn(
-      'El trabajo fue entregado a Windows, pero no se pudo confirmar como impreso en backend.',
-      {
-        jobId: job.id,
-        error: this.errorMessage(lastError),
-      },
-    );
     await this.recordPrintJobEvent(token, job, {
       level: 'WARN',
       stage: 'BACKEND_ACK_FAILED',
       code: 'BACKEND_ACK_FAILED',
       message:
-        'Windows acepto el trabajo, pero el backend no confirmo el estado PRINTED. No se reporta como failed para evitar duplicados.',
+        'Windows completo el ciclo observable del spooler, pero el backend no confirmo PRINTED. No se reporta FAILED para evitar duplicados.',
       metadata: {
         ...metadata,
         ackAttempts: PRINTED_ACK_ATTEMPTS,
@@ -619,14 +533,8 @@ export class BackendPrintClientService {
       metadata?: Record<string, unknown>;
     },
   ): Promise<void> {
-    const errorCode = options.code ?? this.mapPrintError(error);
     const errorMessage = this.errorMessage(error);
-
-    this.dependencies.logger.warn('Trabajo de impresion backend fallido.', {
-      jobId: job.id,
-      errorCode,
-      error: errorMessage,
-    });
+    const errorCode = options.code ?? this.mapPrintError(error);
     this.recordBackendError(errorMessage);
     await this.recordPrintJobEvent(token, job, {
       level: 'ERROR',
@@ -640,10 +548,7 @@ export class BackendPrintClientService {
       `/print-jobs/${encodeURIComponent(job.id)}/failed`,
       {
         method: 'POST',
-        body: {
-          errorCode,
-          errorMessage,
-        },
+        body: { errorCode, errorMessage },
       },
       token,
     ).catch(() => undefined);
@@ -672,79 +577,15 @@ export class BackendPrintClientService {
       },
       token,
     ).catch((error) => {
-      this.dependencies.logger.warn('No fue posible registrar evento de impresion en backend.', {
-        jobId: job.id,
-        stage: event.stage,
-        error: this.errorMessage(error),
-      });
-    });
-  }
-
-  private scheduleSpoolWatchdog(
-    token: string,
-    job: BackendPrintJob,
-    options: {
-      printerName: string;
-      label: string;
-      copyNumber: number;
-      copies: number;
-    },
-  ): void {
-    const timeout = setTimeout(() => {
-      void this.checkSpoolJobAfterDelay(token, job, options);
-    }, SPOOL_WATCHDOG_DELAY_MS);
-    timeout.unref?.();
-  }
-
-  private async checkSpoolJobAfterDelay(
-    token: string,
-    job: BackendPrintJob,
-    options: {
-      printerName: string;
-      label: string;
-      copyNumber: number;
-      copies: number;
-    },
-  ): Promise<void> {
-    const findSpoolJob = this.dependencies.printerService.findSpoolJob?.bind(
-      this.dependencies.printerService,
-    );
-
-    if (!findSpoolJob) {
-      return;
-    }
-
-    try {
-      const spoolJob = await findSpoolJob(options.printerName, options.label);
-
-      if (!spoolJob) {
-        await this.recordPrintJobEvent(token, job, {
-          stage: 'SPOOL_CLEARED',
-          metadata: options,
-        });
-        return;
-      }
-
-      await this.recordPrintJobEvent(token, job, {
-        level: 'WARN',
-        stage: 'SPOOL_STILL_ACTIVE',
-        code: 'SPOOL_STUCK',
-        message:
-          'Windows todavia muestra el trabajo en cola. Revisa papel, tapa, cutter, driver o cola de impresion antes de reintentar.',
-        metadata: {
-          ...options,
-          spoolJob,
+      this.dependencies.logger.warn(
+        'No fue posible registrar evento de impresion en backend.',
+        {
+          backendJobId: job.id,
+          stage: event.stage,
+          error: this.errorMessage(error),
         },
-      });
-    } catch (error) {
-      await this.recordPrintJobEvent(token, job, {
-        level: 'WARN',
-        stage: 'SPOOL_WATCHDOG_FAILED',
-        code: 'SPOOL_WATCHDOG_FAILED',
-        message: this.errorMessage(error),
-        metadata: options,
-      });
-    }
+      );
+    });
   }
 
   private async request<T>(
@@ -754,9 +595,10 @@ export class BackendPrintClientService {
     token: string | null,
   ): Promise<T> {
     const abortController = new AbortController();
-    const timeoutId = setTimeout(() => {
-      abortController.abort();
-    }, BACKEND_REQUEST_TIMEOUT_MS);
+    const timeoutId = setTimeout(
+      () => abortController.abort(),
+      BACKEND_REQUEST_TIMEOUT_MS,
+    );
 
     let response: Response;
 
@@ -777,7 +619,6 @@ export class BackendPrintClientService {
           `La solicitud al backend excedio ${BACKEND_REQUEST_TIMEOUT_MS / 1000}s en ${path}.`,
         );
       }
-
       throw error;
     } finally {
       clearTimeout(timeoutId);
@@ -788,8 +629,7 @@ export class BackendPrintClientService {
         this.handleBackendAuthenticationExpired(response.status);
         throw new BackendAgentAuthExpiredError(response.status);
       }
-
-      throw new Error(`Backend respondió ${response.status}`);
+      throw new Error(`Backend respondio ${response.status}`);
     }
 
     this.recordSuccessfulContact();
@@ -801,40 +641,31 @@ export class BackendPrintClientService {
       return undefined as T;
     }
 
-    if (typeof response.text === 'function') {
-      const rawBody = await response.text();
-      const normalizedBody = rawBody.trim();
-
-      if (!normalizedBody) {
-        return undefined as T;
-      }
-
-      try {
-        return JSON.parse(normalizedBody) as T;
-      } catch {
-        throw new Error(
-          `Backend respondio ${response.status} con cuerpo no JSON en ${path}: ${this.previewResponseBody(normalizedBody)}`,
-        );
-      }
+    if (typeof response.text !== 'function') {
+      return response.json() as Promise<T>;
     }
 
-    if (typeof response.json === 'function') {
-      return (await response.json()) as T;
+    const rawBody = await response.text();
+    const normalizedBody = rawBody.trim();
+
+    if (!normalizedBody) {
+      return undefined as T;
     }
 
-    return undefined as T;
+    try {
+      return JSON.parse(normalizedBody) as T;
+    } catch {
+      throw new Error(
+        `Backend respondio ${response.status} con cuerpo no JSON en ${path}: ${this.previewResponseBody(normalizedBody)}`,
+      );
+    }
   }
 
   private previewResponseBody(value: string): string {
     const normalizedValue = value.replace(/\s+/g, ' ').trim();
-
-    if (!normalizedValue) {
-      return '<vacio>';
-    }
-
     return normalizedValue.length > 160
       ? `${normalizedValue.slice(0, 160)}...`
-      : normalizedValue;
+      : normalizedValue || '<vacio>';
   }
 
   private handleBackendAuthenticationExpired(statusCode: 401 | 403): void {
@@ -844,12 +675,11 @@ export class BackendPrintClientService {
 
     this.authExpiredHandled = true;
     this.stop();
-    this.dependencies.configService.saveConfig({
-      backendDeviceToken: null,
-    });
-    this.dependencies.logger.warn('Sesion del agente expirada o revocada. Se requiere nuevo pairing.', {
-      statusCode,
-    });
+    this.dependencies.configService.saveConfig({ backendDeviceToken: null });
+    this.dependencies.logger.warn(
+      'Sesion del agente expirada o revocada. Se requiere nuevo pairing.',
+      { statusCode },
+    );
     this.dependencies.notify?.(
       'Gestion al Dia Print Agent',
       'Sesion expirada. Realiza el pairing nuevamente.',
@@ -857,12 +687,18 @@ export class BackendPrintClientService {
   }
 
   private resolveBaseUrl(): string {
-    const configuredBaseUrl = this.dependencies.configService.getConfig().backendBaseUrl;
-    return configuredBaseUrl || DEFAULT_BACKEND_BASE_URL;
+    return (
+      this.dependencies.configService.getConfig().backendBaseUrl ||
+      DEFAULT_BACKEND_BASE_URL
+    );
   }
 
   private resolveDeviceName(): string {
-    return process.env.COMPUTERNAME || process.env.HOSTNAME || 'Gestion al Dia Print Agent';
+    return (
+      process.env.COMPUTERNAME ||
+      process.env.HOSTNAME ||
+      'Gestion al Dia Print Agent'
+    );
   }
 
   private mapPrintError(error: unknown): string {
@@ -871,15 +707,12 @@ export class BackendPrintClientService {
     if (/not found|no encontrada|no existe/i.test(message)) {
       return 'PRINTER_NOT_FOUND';
     }
-
     if (/timeout|tiempo/i.test(message)) {
       return 'PRINT_TIMEOUT';
     }
-
     if (/offline|desconect/i.test(message)) {
       return 'PRINTER_OFFLINE';
     }
-
     return 'UNKNOWN_ERROR';
   }
 
@@ -904,10 +737,9 @@ export class BackendPrintClientService {
   }
 
   private recordBackendError(message: string): void {
-    const normalizedMessage = message.trim();
     this.lastErrorSnapshot = {
       at: new Date().toISOString(),
-      message: normalizedMessage || 'Ocurrio un error de comunicacion con el backend.',
+      message: message.trim() || 'Ocurrio un error de comunicacion con el backend.',
     };
   }
 }

@@ -15,6 +15,7 @@
     "patch:printer": "node scripts/patch-printer.js",
     "dev": "npm run build && electron .",
     "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test tests/*.test.cjs",
     "dist:win": "npm run build && electron-builder --win nsis",
     "release:win": "npm run build && electron-builder --win nsis --publish never",
     "typecheck": "tsc -p tsconfig.json --noEmit"

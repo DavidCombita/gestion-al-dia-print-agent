@@ -1,3 +1,5 @@
+import { PrinterProfile } from '../printing/contracts/printer-profile';
+
 export type PaperWidth = '58mm' | '80mm';
 
 export interface AppConfig {
@@ -14,6 +16,10 @@ export interface AppConfig {
   backendAgentId: string | null;
   backendBusinessId: string | null;
   backendDeviceToken: string | null;
+  printerProfiles: PrinterProfile[];
+  printJobPollIntervalMs: number;
+  printJobCompletionTimeoutMs: number;
+  maxPendingPrintJobsPerPrinter: number;
 }
 
 export const DEFAULT_ALLOWED_ORIGINS = [
@@ -37,10 +43,15 @@ export const defaultAppConfig: AppConfig = {
   backendAgentId: null,
   backendBusinessId: null,
   backendDeviceToken: null,
+  printerProfiles: [],
+  printJobPollIntervalMs: 750,
+  printJobCompletionTimeoutMs: 45_000,
+  maxPendingPrintJobsPerPrinter: 50,
 };
 
 export function sanitizeAppConfig(value: unknown): AppConfig {
   const record = isRecord(value) ? value : {};
+  const paperWidth = normalizePaperWidth(record.paperWidth);
 
   return {
     invoicePrinterName: normalizeNullableString(record.invoicePrinterName),
@@ -49,13 +60,32 @@ export function sanitizeAppConfig(value: unknown): AppConfig {
     kitchenCopies: normalizeCopies(record.kitchenCopies),
     invoiceEnabled: normalizeBoolean(record.invoiceEnabled, true),
     kitchenEnabled: normalizeBoolean(record.kitchenEnabled, true),
-    paperWidth: normalizePaperWidth(record.paperWidth),
+    paperWidth,
     pairingToken: normalizeNullableString(record.pairingToken),
     allowedOrigins: normalizeAllowedOrigins(record.allowedOrigins),
     backendBaseUrl: normalizeBackendBaseUrl(record.backendBaseUrl),
     backendAgentId: normalizeNullableString(record.backendAgentId),
     backendBusinessId: normalizeNullableString(record.backendBusinessId),
     backendDeviceToken: normalizeNullableString(record.backendDeviceToken),
+    printerProfiles: normalizePrinterProfiles(record.printerProfiles, paperWidth),
+    printJobPollIntervalMs: normalizeInteger(
+      record.printJobPollIntervalMs,
+      750,
+      250,
+      5_000,
+    ),
+    printJobCompletionTimeoutMs: normalizeInteger(
+      record.printJobCompletionTimeoutMs,
+      45_000,
+      5_000,
+      180_000,
+    ),
+    maxPendingPrintJobsPerPrinter: normalizeInteger(
+      record.maxPendingPrintJobsPerPrinter,
+      50,
+      1,
+      500,
+    ),
   };
 }
 
@@ -84,6 +114,93 @@ function normalizeBoolean(value: unknown, fallback: boolean): boolean {
 
 function normalizePaperWidth(value: unknown): PaperWidth {
   return value === '58mm' ? '58mm' : '80mm';
+}
+
+function normalizePrinterProfiles(
+  value: unknown,
+  fallbackPaperWidth: PaperWidth,
+): PrinterProfile[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const profiles = new Map<string, PrinterProfile>();
+
+  for (const candidate of value) {
+    if (!isRecord(candidate)) {
+      continue;
+    }
+
+    const systemName = normalizeNullableString(candidate.systemName);
+
+    if (!systemName) {
+      continue;
+    }
+
+    const raw = isRecord(candidate.raw) ? candidate.raw : {};
+    const driver = isRecord(candidate.driver) ? candidate.driver : {};
+    const charactersPerLine = normalizeOptionalInteger(
+      candidate.charactersPerLine,
+      16,
+      80,
+    );
+    const profile: PrinterProfile = {
+      systemName,
+      transport:
+        candidate.transport === 'WINDOWS_DRIVER'
+          ? 'WINDOWS_DRIVER'
+          : 'WINDOWS_RAW',
+      paperWidth:
+        candidate.paperWidth === '58mm' || candidate.paperWidth === '80mm'
+          ? candidate.paperWidth
+          : fallbackPaperWidth,
+      charactersPerLine,
+      raw: {
+        codePage: 'CP850',
+        cutPaper: normalizeBoolean(raw.cutPaper, true),
+        openCashDrawer: normalizeBoolean(raw.openCashDrawer, false),
+      },
+      driver: {
+        usePrinterDefaultPageSize: normalizeBoolean(
+          driver.usePrinterDefaultPageSize,
+          true,
+        ),
+      },
+    };
+
+    profiles.set(systemName.toLocaleLowerCase(), profile);
+  }
+
+  return Array.from(profiles.values());
+}
+
+function normalizeInteger(
+  value: unknown,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+): number {
+  const normalized = normalizeOptionalInteger(value, minimum, maximum);
+  return normalized ?? fallback;
+}
+
+function normalizeOptionalInteger(
+  value: unknown,
+  minimum: number,
+  maximum: number,
+): number | undefined {
+  const parsed =
+    typeof value === 'number'
+      ? value
+      : typeof value === 'string'
+        ? Number(value)
+        : Number.NaN;
+
+  if (!Number.isFinite(parsed)) {
+    return undefined;
+  }
+
+  return Math.min(maximum, Math.max(minimum, Math.trunc(parsed)));
 }
 
 function normalizeAllowedOrigins(value: unknown): string[] {

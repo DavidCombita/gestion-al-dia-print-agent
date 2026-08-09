@@ -6,6 +6,7 @@ const { BackendPrintClientService } = require('../dist/backend/backend-print-cli
 const { sanitizeAppConfig } = require('../dist/config/config.schema.js');
 const { formatInvoice } = require('../dist/printing/formatters/invoice.formatter.js');
 const { formatKitchenOrder } = require('../dist/printing/formatters/kitchen-order.formatter.js');
+const { formatBackendPrintJob } = require('../dist/printing/strategies/print-format-strategy.registry.js');
 
 test('preserves a custom backend base URL in the local config schema', () => {
   const parsedConfig = sanitizeAppConfig({
@@ -335,8 +336,8 @@ test('routes thermal inventory and shift reports without requiring receipt field
     },
   };
 
-  const shiftBuffer = service.formatJob('SHIFT_REPORT', payload);
-  const inventoryBuffer = service.formatJob('INVENTORY_REPORT', {
+  const shiftBuffer = formatBackendPrintJob('SHIFT_REPORT', payload);
+  const inventoryBuffer = formatBackendPrintJob('INVENTORY_REPORT', {
     ...payload,
     reportKind: 'INVENTORY',
     title: 'Gestion de Inventario',
@@ -349,7 +350,6 @@ test('routes thermal inventory and shift reports without requiring receipt field
 });
 
 test('rejects payloads that do not match the selected print strategy', () => {
-  const service = createService({ savedConfigs: [], notifications: [], warnings: [] });
   const thermalPayload = {
     version: 1,
     reportKind: 'INVENTORY',
@@ -376,11 +376,11 @@ test('rejects payloads that do not match the selected print strategy', () => {
   };
 
   assert.throws(
-    () => service.formatJob('SHIFT_REPORT', thermalPayload),
+    () => formatBackendPrintJob('SHIFT_REPORT', thermalPayload),
     /SHIFT_REPORT.*shift/i,
   );
   assert.throws(
-    () => service.formatJob('RECEIPT', thermalPayload),
+    () => formatBackendPrintJob('RECEIPT', thermalPayload),
     /RECEIPT.*factura/i,
   );
 });
@@ -473,7 +473,7 @@ test('does not report failed after Windows accepts a raw job but backend printed
     assert.equal(result, false);
     assert.equal(failedRequests.length, 0);
     assert.equal(requests.filter((request) => request.path.endsWith('/printed')).length, 3);
-    assert.equal(eventStages.includes('SPOOL_ACCEPTED'), true);
+    assert.equal(eventStages.includes('LOCAL_SPOOL_COMPLETED'), true);
     assert.equal(eventStages.includes('BACKEND_ACK_FAILED'), true);
   } finally {
     global.fetch = restoreFetch;
@@ -576,18 +576,33 @@ function createService({ savedConfigs, notifications, warnings, configOverrides 
         warnings.push({ message, ...(payload || {}) });
       },
     },
-    printerService: {
+    printerDiscoveryService: {
       listPrinters: async () => [],
-      printRaw: async () => undefined,
     },
-    queueService: {
-      enqueue: async (_label, task) => task(),
-    },
-    printHistoryService: {
-      recordQueued: () => 'history-1',
-      markProcessing() {},
-      markCompleted() {},
-      markFailed() {},
+    printOrchestrator: {
+      execute: async (request) => ({
+        status: 'SPOOL_COMPLETED',
+        retrySafety: 'UNSAFE_TO_RETRY',
+        printerName: request.printerName,
+        transport: 'WINDOWS_RAW',
+        copies: 1,
+        attempts: [
+          {
+            localJobId: 'history-1',
+            attemptId: 'history-1',
+            copyNumber: 1,
+            status: 'SPOOL_COMPLETED',
+            retrySafety: 'UNSAFE_TO_RETRY',
+            submitted: true,
+            printerName: request.printerName,
+            documentName: 'test',
+            transport: 'WINDOWS_RAW',
+            systemJobId: 123,
+            completedAt: new Date().toISOString(),
+            elapsedMs: 10,
+          },
+        ],
+      }),
     },
     notify(title, content) {
       notifications.push({ title, content });

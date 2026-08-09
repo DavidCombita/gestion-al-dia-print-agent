@@ -4,9 +4,12 @@ import express, { NextFunction, Request, Response } from 'express';
 import { shell } from 'electron';
 import { AppConfigService } from '../config/app-config.service';
 import { LoggerService } from '../logs/logger.service';
-import { PrintHistoryService } from '../printing/print-history.service';
-import { PrintQueueService } from '../printing/print-queue.service';
-import { PrinterService } from '../printing/printer.service';
+import { PrintHistoryService } from '../printing/history/print-history.service';
+import { PrintOrchestratorService } from '../printing/print-orchestrator.service';
+import { PrintDiagnosticsService } from '../printing/diagnostics/print-diagnostics.service';
+import { PrinterDiscoveryService } from '../printing/printers/printer-discovery.service';
+import { PrinterProfileService } from '../printing/printers/printer-profile.service';
+import { PrinterQueueService } from '../printing/queue/printer-queue.service';
 import {
   AgentHealthResponse,
   AgentMutationResponse,
@@ -23,15 +26,14 @@ import {
 import { PairingTokenService } from '../security/pairing-token.service';
 import { BackendPrintClientService } from '../backend/backend-print-client.service';
 import { sanitizeAppConfig } from '../config/config.schema';
-import { formatInvoice } from '../printing/formatters/invoice.formatter';
-import { formatKitchenOrder } from '../printing/formatters/kitchen-order.formatter';
-import { formatTestTicket } from '../printing/formatters/test-ticket.formatter';
+import { PrinterProfile } from '../printing/contracts/printer-profile';
+import { PrintExecutionResultStatus } from '../printing/contracts/print-result';
 
 const HOST = '127.0.0.1';
 const PORT = 3088;
 const SERVER_KEEP_ALIVE_TIMEOUT_MS = 30_000;
 const SERVER_HEADERS_TIMEOUT_MS = 35_000;
-const SERVER_REQUEST_TIMEOUT_MS = 95_000;
+const SERVER_REQUEST_TIMEOUT_MS = 970_000;
 const REQUEST_HANDLER_TIMEOUT_MS = 90_000;
 const SERVER_STOP_TIMEOUT_MS = 5_000;
 
@@ -40,8 +42,11 @@ export interface LocalServerDependencies {
   startedAt: number;
   configService: AppConfigService;
   logger: LoggerService;
-  queueService: PrintQueueService;
-  printerService: PrinterService;
+  queueService: PrinterQueueService;
+  printerDiscoveryService: PrinterDiscoveryService;
+  printerProfileService: PrinterProfileService;
+  printOrchestrator: PrintOrchestratorService;
+  printDiagnosticsService: PrintDiagnosticsService;
   printHistoryService: PrintHistoryService;
   pairingTokenService: PairingTokenService;
   backendPrintClient: BackendPrintClientService;
@@ -145,7 +150,7 @@ export class LocalServer {
 
   private configure(): void {
     this.app.disable('x-powered-by');
-    this.app.use(express.json({ limit: '1mb' }));
+    this.app.use(express.json({ limit: '3mb' }));
     this.app.use((request, response, next) => {
       const origin = request.header('origin');
       const isPrivateNetworkPreflight =
@@ -173,7 +178,11 @@ export class LocalServer {
     });
     this.app.use(cors(createCorsOptions()));
     this.app.use((request, response, next) => {
-      response.setTimeout(REQUEST_HANDLER_TIMEOUT_MS, () => {
+      const config = this.dependencies.configService.getConfig();
+      const requestTimeoutMs = isPrintExecutionRequest(request)
+        ? config.printJobCompletionTimeoutMs * 5 + 60_000
+        : REQUEST_HANDLER_TIMEOUT_MS;
+      response.setTimeout(requestTimeoutMs, () => {
         if (response.headersSent) {
           return;
         }
@@ -193,7 +202,7 @@ export class LocalServer {
 
     this.app.get('/health', async (_request, response) => {
       const config = this.dependencies.configService.getConfig();
-      const printerModuleStatus = await this.dependencies.printerService.getModuleStatus();
+      const printerModuleStatus = await this.dependencies.printerDiscoveryService.getModuleStatus();
       const backendRuntimeStatus = this.dependencies.backendPrintClient.getStatusSnapshot();
       const payload: AgentHealthResponse = {
         status: 'ok',
@@ -233,7 +242,7 @@ export class LocalServer {
     this.app.get('/printers', async (_request, response, next) => {
       try {
         response.json({
-          printers: await this.dependencies.printerService.listPrinters(),
+          printers: await this.dependencies.printerDiscoveryService.listPrinters(),
         });
       } catch (error) {
         next(error);
@@ -251,6 +260,14 @@ export class LocalServer {
         jobs: this.dependencies.printHistoryService.getRecentJobs(),
       };
       response.json(payload);
+    });
+
+    this.app.get('/printing/status', async (_request, response, next) => {
+      try {
+        response.json(await this.dependencies.printDiagnosticsService.getOverview());
+      } catch (error) {
+        next(error);
+      }
     });
 
     this.app.post('/config', (request, response, next) => {
@@ -319,13 +336,151 @@ export class LocalServer {
       }
     });
 
+    this.app.post('/printing/printers/profile', (request, response, next) => {
+      try {
+        const requestedProfile = request.body as Partial<PrinterProfile>;
+        const systemName = requireBodyPrinterName(requestedProfile?.systemName);
+        const currentProfile = this.dependencies.printerProfileService.resolveProfile(
+          systemName,
+        );
+        const profile = this.dependencies.printerProfileService.saveProfile(
+          {
+            ...currentProfile,
+            ...requestedProfile,
+            systemName,
+            raw: {
+              ...currentProfile.raw,
+              ...requestedProfile.raw,
+            },
+            driver: {
+              ...currentProfile.driver,
+              ...requestedProfile.driver,
+              usePrinterDefaultPageSize:
+                requestedProfile.driver?.usePrinterDefaultPageSize ??
+                currentProfile.driver?.usePrinterDefaultPageSize ??
+                true,
+            },
+          },
+        );
+        response.json({
+          success: true,
+          message: `Perfil de ${profile.systemName} actualizado.`,
+          profile,
+        });
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    this.app.post('/printing/printers/unblock', (request, response, next) => {
+      try {
+        const printerName = requireBodyPrinterName(request.body?.printerName);
+        this.dependencies.printOrchestrator.unblockPrinter(printerName);
+        this.sendSuccess(
+          response,
+          `La impresora ${printerName} fue desbloqueada conscientemente.`,
+        );
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    this.app.post('/printing/diagnostics/raw-minimal', async (request, response, next) => {
+      try {
+        const printerName = requireBodyPrinterName(request.body?.printerName);
+        const result = await this.dependencies.printDiagnosticsService.runRawMinimal(
+          printerName,
+        );
+        response.json({ success: result.status === 'SPOOL_COMPLETED', result });
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    this.app.post('/printing/diagnostics/raw-full', async (request, response, next) => {
+      try {
+        const printerName = requireBodyPrinterName(request.body?.printerName);
+        const result = await this.dependencies.printDiagnosticsService.runRawFull(
+          printerName,
+        );
+        response.json({ success: result.status === 'SPOOL_COMPLETED', result });
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    this.app.post('/printing/diagnostics/driver', async (request, response, next) => {
+      try {
+        const printerName = requireBodyPrinterName(request.body?.printerName);
+        const result = await this.dependencies.printDiagnosticsService.runDriver(
+          printerName,
+        );
+        response.json({ success: result.status === 'SPOOL_COMPLETED', result });
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    this.app.get('/printing/diagnostics/export', async (request, response, next) => {
+      try {
+        const printerName = requireBodyPrinterName(request.query.printerName);
+        response.json(
+          await this.dependencies.printDiagnosticsService.exportDiagnostic(printerName),
+        );
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    this.app.post('/printing/jobs/:localJobId/cancel', async (request, response, next) => {
+      try {
+        const job = await this.dependencies.printOrchestrator.cancelJob(
+          request.params.localJobId,
+        );
+        response.json({
+          success: true,
+          message: `El trabajo ${job.localJobId} fue cancelado y eliminado de Windows.`,
+          job,
+        });
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    this.app.post('/printing/jobs/:localJobId/refresh', async (request, response, next) => {
+      try {
+        const job = await this.dependencies.printOrchestrator.refreshJobStatus(
+          request.params.localJobId,
+        );
+        response.json({
+          success: true,
+          message: `Estado de ${job.localJobId} consultado en Windows.`,
+          job,
+        });
+      } catch (error) {
+        next(error);
+      }
+    });
+
     this.app.post('/print/test', async (_request, response, next) => {
       try {
         const config = this.dependencies.configService.getConfig();
         const payload = buildTestPayload(config.paperWidth);
-        const printerName = this.dependencies.printerService.resolvePrinterName('invoice');
-        await this.enqueuePrint('ticket-de-prueba', printerName, formatTestTicket(payload));
-        this.sendSuccess(response, 'Ticket de prueba enviado a la impresora configurada.');
+        const printerName = resolveConfiguredPrinter(config.invoicePrinterName, 'facturas');
+        const result = await this.dependencies.printOrchestrator.execute({
+          source: 'LOCAL',
+          jobType: 'TEST_PRINT',
+          payload,
+          printerName,
+          documentName: 'ticket-de-prueba',
+          copies: 1,
+          paperWidth: config.paperWidth,
+        });
+        response.json({
+          success: result.status === 'SPOOL_COMPLETED',
+          message: describePrintResult('Ticket de prueba', result.status),
+          result,
+        });
       } catch (error) {
         next(error);
       }
@@ -340,18 +495,21 @@ export class LocalServer {
 
         const payload = request.body as ReceiptJobPayload;
         const copies = payload.options?.copies ?? config.invoiceCopies;
-        const printerName = this.dependencies.printerService.resolvePrinterName('invoice');
-        const buffer = formatInvoice({
-          ...payload,
-          options: {
-            ...payload.options,
-            copies,
-            paperWidth: payload.options?.paperWidth ?? config.paperWidth,
-          },
+        const printerName = resolveConfiguredPrinter(config.invoicePrinterName, 'facturas');
+        const result = await this.dependencies.printOrchestrator.execute({
+          source: 'LOCAL',
+          jobType: 'RECEIPT',
+          payload,
+          printerName,
+          documentName: 'factura',
+          copies,
+          paperWidth: payload.options?.paperWidth ?? config.paperWidth,
         });
-
-        await this.enqueueCopies('factura', printerName, buffer, copies);
-        this.sendSuccess(response, 'Factura enviada al agente local.');
+        response.json({
+          success: result.status === 'SPOOL_COMPLETED',
+          message: describePrintResult('Factura', result.status),
+          result,
+        });
       } catch (error) {
         next(error);
       }
@@ -366,18 +524,21 @@ export class LocalServer {
 
         const payload = request.body as ReceiptJobPayload;
         const copies = payload.options?.copies ?? config.kitchenCopies;
-        const printerName = this.dependencies.printerService.resolvePrinterName('kitchen');
-        const buffer = formatKitchenOrder({
-          ...payload,
-          options: {
-            ...payload.options,
-            copies,
-            paperWidth: payload.options?.paperWidth ?? config.paperWidth,
-          },
+        const printerName = resolveConfiguredPrinter(config.kitchenPrinterName, 'cocina');
+        const result = await this.dependencies.printOrchestrator.execute({
+          source: 'LOCAL',
+          jobType: 'KITCHEN_TICKET',
+          payload,
+          printerName,
+          documentName: 'comanda-cocina',
+          copies,
+          paperWidth: payload.options?.paperWidth ?? config.paperWidth,
         });
-
-        await this.enqueueCopies('comanda-cocina', printerName, buffer, copies);
-        this.sendSuccess(response, 'Comanda enviada al agente local.');
+        response.json({
+          success: result.status === 'SPOOL_COMPLETED',
+          message: describePrintResult('Comanda', result.status),
+          result,
+        });
       } catch (error) {
         next(error);
       }
@@ -439,38 +600,6 @@ export class LocalServer {
       success: false,
       message: 'Token local invalido. Vuelve a emparejar el agente con Gestion al Dia.',
     });
-  }
-
-  private async enqueuePrint(
-    label: string,
-    printerName: string,
-    buffer: Buffer,
-  ): Promise<void> {
-    const jobId = this.dependencies.printHistoryService.recordQueued(label, printerName);
-
-    await this.dependencies.queueService.enqueue(label, async () => {
-      this.dependencies.printHistoryService.markProcessing(jobId);
-
-      try {
-        await this.dependencies.printerService.printRaw(printerName, label, buffer);
-        this.dependencies.printHistoryService.markCompleted(jobId);
-      } catch (error) {
-        this.dependencies.printHistoryService.markFailed(jobId, error);
-        throw error;
-      }
-    });
-  }
-
-  private async enqueueCopies(
-    label: string,
-    printerName: string,
-    buffer: Buffer,
-    copies: number,
-  ): Promise<void> {
-    for (let index = 0; index < Math.max(1, Math.trunc(copies)); index += 1) {
-      const currentLabel = copies > 1 ? `${label}-${index + 1}` : label;
-      await this.enqueuePrint(currentLabel, printerName, buffer);
-    }
   }
 
   private sendSuccess(response: Response<AgentMutationResponse>, message: string): void {
@@ -552,6 +681,45 @@ function buildTestPayload(paperWidth: '58mm' | '80mm'): ReceiptJobPayload {
   };
 }
 
+function resolveConfiguredPrinter(
+  printerName: string | null,
+  purpose: string,
+): string {
+  if (!printerName?.trim()) {
+    throw new Error(`No hay una impresora configurada para ${purpose}.`);
+  }
+
+  return printerName.trim();
+}
+
+function requireBodyPrinterName(value: unknown): string {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new Error('El system name de la impresora es obligatorio.');
+  }
+
+  return value.trim();
+}
+
+function describePrintResult(
+  subject: string,
+  status: PrintExecutionResultStatus,
+): string {
+  switch (status) {
+    case 'SPOOL_COMPLETED':
+      return `${subject}: Windows dejo de tener el trabajo pendiente sin reportar error.`;
+    case 'FAILED':
+      return `${subject}: el trabajo fallo antes de completar el ciclo del spooler.`;
+    case 'STUCK':
+      return `${subject}: el trabajo quedo atascado y la impresora fue bloqueada para evitar duplicados.`;
+    case 'CANCELLED':
+      return `${subject}: el trabajo fue cancelado.`;
+    case 'PARTIAL_FAILURE':
+      return `${subject}: algunas copias completaron y otras no. No se reintentaran automaticamente.`;
+    default:
+      return `${subject}: Windows acepto el trabajo, pero el resultado final no pudo confirmarse.`;
+  }
+}
+
 function normalizeNullableString(value: unknown, fallback: string | null): string | null {
   if (typeof value !== 'string') {
     return fallback;
@@ -559,6 +727,14 @@ function normalizeNullableString(value: unknown, fallback: string | null): strin
 
   const trimmedValue = value.trim();
   return trimmedValue ? trimmedValue : null;
+}
+
+function isPrintExecutionRequest(request: Request): boolean {
+  return (
+    request.method === 'POST' &&
+    (request.path.startsWith('/print/') ||
+      request.path.startsWith('/printing/diagnostics/'))
+  );
 }
 
 function isTrustedRecoveryRequest(
@@ -583,15 +759,29 @@ function isTrustedRecoveryRequest(
   }
 
   if (request.method !== 'GET') {
-    return false;
+    const localOperationalPath =
+      request.path.startsWith('/printing/diagnostics/') ||
+      request.path.startsWith('/printing/jobs/') ||
+      request.path === '/printing/printers/profile' ||
+      request.path === '/printing/printers/unblock';
+
+    return (
+      localOperationalPath &&
+      isLoopbackAddress(request.socket.remoteAddress) &&
+      (isLocalAgentOrigin(request.header('origin')) ||
+        isLocalAgentOrigin(request.header('referer')))
+    );
   }
 
-  if (request.path === '/config' || request.path === '/printers') {
+  if (
+    request.path === '/config' ||
+    request.path === '/printers'
+  ) {
     const origin = request.header('origin');
     return Boolean(origin && isTrustedBrowserOrigin(origin));
   }
 
-  if (request.path !== '/jobs') {
+  if (request.path !== '/jobs' && request.path !== '/printing/status') {
     return false;
   }
 
@@ -663,9 +853,7 @@ function buildMonitorPage(): string {
         margin: 0;
         min-height: 100vh;
         font-family: "Segoe UI", sans-serif;
-        background:
-          radial-gradient(circle at top right, rgba(31, 120, 255, 0.16), transparent 28%),
-          linear-gradient(180deg, #f8fbff 0%, var(--bg) 100%);
+        background: var(--bg);
         color: var(--text);
       }
 
@@ -699,7 +887,7 @@ function buildMonitorPage(): string {
         border: 1px solid var(--border);
         background: rgba(255, 255, 255, 0.82);
         color: var(--muted);
-        border-radius: 999px;
+        border-radius: 6px;
         padding: 10px 14px;
         font-size: 13px;
         white-space: nowrap;
@@ -716,7 +904,7 @@ function buildMonitorPage(): string {
       .card {
         background: rgba(255, 255, 255, 0.88);
         border: 1px solid rgba(216, 227, 240, 0.88);
-        border-radius: 20px;
+        border-radius: 8px;
         padding: 18px;
         box-shadow: var(--shadow);
         backdrop-filter: blur(8px);
@@ -736,7 +924,7 @@ function buildMonitorPage(): string {
       .panel {
         background: rgba(255, 255, 255, 0.92);
         border: 1px solid rgba(216, 227, 240, 0.9);
-        border-radius: 24px;
+        border-radius: 8px;
         box-shadow: var(--shadow);
         overflow: hidden;
         margin-bottom: 24px;
@@ -748,7 +936,7 @@ function buildMonitorPage(): string {
         align-items: center;
         gap: 16px;
         padding: 20px 22px;
-        background: linear-gradient(135deg, rgba(31, 120, 255, 0.08), rgba(255, 255, 255, 0.92));
+        background: var(--surface-soft);
         border-bottom: 1px solid var(--border);
       }
 
@@ -777,7 +965,7 @@ function buildMonitorPage(): string {
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        border-radius: 999px;
+        border-radius: 6px;
         padding: 6px 12px;
         font-size: 12px;
         font-weight: 700;
@@ -786,17 +974,29 @@ function buildMonitorPage(): string {
       }
 
       .status--queued,
-      .status--processing {
+      .status--formatting,
+      .status--ready,
+      .status--submitting,
+      .status--submitted,
+      .status--spooling,
+      .status--printing,
+      .status--unknown,
+      .status--stuck,
+      .status--blocked {
         color: var(--warn);
         background: rgba(183, 121, 31, 0.12);
       }
 
-      .status--completed {
+      .status--completed,
+      .status--spool_completed,
+      .status--healthy {
         color: var(--ok);
         background: rgba(19, 138, 82, 0.12);
       }
 
-      .status--failed {
+      .status--failed,
+      .status--cancelled,
+      .status--degraded {
         color: var(--error);
         background: rgba(192, 57, 43, 0.12);
       }
@@ -858,7 +1058,7 @@ function buildMonitorPage(): string {
 
       .meta-item {
         padding: 16px;
-        border-radius: 18px;
+        border-radius: 8px;
         border: 1px solid var(--border);
         background: var(--surface-soft);
       }
@@ -898,7 +1098,7 @@ function buildMonitorPage(): string {
       .field input {
         width: 100%;
         border: 1px solid var(--border);
-        border-radius: 14px;
+        border-radius: 6px;
         padding: 12px 14px;
         font: inherit;
         color: var(--text);
@@ -917,9 +1117,9 @@ function buildMonitorPage(): string {
       }
 
       .button {
-        border: none;
-        border-radius: 999px;
-        padding: 12px 18px;
+        border: 1px solid transparent;
+        border-radius: 6px;
+        padding: 9px 12px;
         font: inherit;
         font-weight: 700;
         cursor: pointer;
@@ -929,6 +1129,78 @@ function buildMonitorPage(): string {
         background: var(--accent);
         color: #fff;
         box-shadow: var(--shadow);
+      }
+
+      .button--secondary {
+        border-color: var(--border);
+        background: var(--surface);
+        color: var(--text);
+      }
+
+      .button--danger {
+        border-color: rgba(192, 57, 43, 0.35);
+        background: #fff;
+        color: var(--error);
+      }
+
+      .printer-list {
+        display: grid;
+      }
+
+      .printer-row {
+        padding: 18px 22px;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .printer-row:last-child {
+        border-bottom: 0;
+      }
+
+      .printer-title,
+      .printer-actions,
+      .profile-control {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+
+      .printer-title {
+        justify-content: space-between;
+        margin-bottom: 14px;
+      }
+
+      .printer-title h3 {
+        margin: 0;
+        font-size: 17px;
+      }
+
+      .printer-data {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+        gap: 10px 18px;
+        margin-bottom: 14px;
+      }
+
+      .printer-data dt {
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 700;
+        text-transform: uppercase;
+      }
+
+      .printer-data dd {
+        margin: 5px 0 0;
+        font-size: 13px;
+        overflow-wrap: anywhere;
+      }
+
+      .profile-control select {
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 8px 10px;
+        background: #fff;
+        color: var(--text);
       }
 
       .button:disabled {
@@ -944,7 +1216,7 @@ function buildMonitorPage(): string {
       }
 
       .notice {
-        border-radius: 16px;
+        border-radius: 8px;
         padding: 14px 16px;
         line-height: 1.5;
         font-size: 14px;
@@ -1018,6 +1290,18 @@ function buildMonitorPage(): string {
           <span>Conexion backend</span>
           <strong id="backend-link">Sin vincular</strong>
         </article>
+      </section>
+
+      <section class="panel">
+        <div class="panel__head">
+          <div>
+            <h2>Estado de impresoras</h2>
+            <p>Estado local, transporte configurado y ultimo trabajo observado en Windows.</p>
+          </div>
+        </div>
+        <div id="printer-container" class="printer-list">
+          <div class="empty">Consultando impresoras...</div>
+        </div>
       </section>
 
       <section class="panel">
@@ -1112,6 +1396,7 @@ function buildMonitorPage(): string {
       const backendRegisterSubmit = document.getElementById('backend-register-submit');
       const backendRegisterFeedback = document.getElementById('backend-register-feedback');
       const tableContainerNode = document.getElementById('table-container');
+      const printerContainerNode = document.getElementById('printer-container');
       const manualRefreshButton = document.getElementById('manual-refresh');
 
       function formatDate(value) {
@@ -1217,11 +1502,15 @@ function buildMonitorPage(): string {
             return \`
               <tr>
                 <td>
-                  <div class="job-label">\${escapeHtml(job.label)}</div>
-                  <span class="job-meta">ID: \${escapeHtml(job.id)}</span>
+                  <div class="job-label">\${escapeHtml(job.documentName || job.jobType)}</div>
+                  <span class="job-meta">Local: \${escapeHtml(job.localJobId)}</span>
+                  <span class="job-meta">Backend: \${escapeHtml(job.backendJobId || 'Local')}</span>
                 </td>
                 <td>\${escapeHtml(job.printerName)}</td>
-                <td><span class="status status--\${escapeHtml(job.status)}">\${escapeHtml(job.status)}</span></td>
+                <td>
+                  <span class="status status--\${escapeHtml(String(job.status).toLowerCase())}">\${escapeHtml(job.status)}</span>
+                  <span class="job-meta">Windows JobId: \${escapeHtml(job.windowsJobId ?? 'No disponible')}</span>
+                </td>
                 <td>\${escapeHtml(formatDate(job.updatedAt))}</td>
                 <td>\${errorHtml}</td>
               </tr>
@@ -1245,13 +1534,71 @@ function buildMonitorPage(): string {
         \`;
       }
 
+      function renderPrinters(payload) {
+        const printers = payload && Array.isArray(payload.printers) ? payload.printers : [];
+
+        if (printers.length === 0) {
+          printerContainerNode.innerHTML = '<div class="empty">Windows no reporto impresoras instaladas.</div>';
+          return;
+        }
+
+        printerContainerNode.innerHTML = printers.map((printer) => {
+          const lastJob = printer.lastJob || {};
+          const canQuery = Boolean(lastJob.localJobId && lastJob.windowsJobId);
+          const canCancel = canQuery && ['SUBMITTED', 'SPOOLING', 'PRINTING', 'STUCK', 'UNKNOWN'].includes(lastJob.status);
+          const duration = typeof lastJob.elapsedMs === 'number'
+            ? (lastJob.elapsedMs / 1000).toFixed(1) + ' s'
+            : 'Sin datos';
+          const windowsStatus = Array.isArray(lastJob.lastWindowsStatus) && lastJob.lastWindowsStatus.length
+            ? lastJob.lastWindowsStatus.join(', ')
+            : 'Sin datos';
+
+          return \`
+            <article class="printer-row" data-printer="\${escapeHtml(printer.systemName)}" data-paper-width="\${escapeHtml(printer.paperWidth)}">
+              <div class="printer-title">
+                <h3>\${escapeHtml(printer.name)}</h3>
+                <span class="status status--\${escapeHtml(String(printer.agentStatus).toLowerCase())}">\${escapeHtml(printer.agentStatus)}</span>
+              </div>
+              <dl class="printer-data">
+                <div><dt>System name</dt><dd>\${escapeHtml(printer.systemName)}</dd></div>
+                <div><dt>Transporte</dt><dd>\${escapeHtml(printer.transport)}</dd></div>
+                <div><dt>Cola local</dt><dd>\${escapeHtml(printer.queue?.pendingJobs ?? 0)}</dd></div>
+                <div><dt>Ultimo backend job</dt><dd>\${escapeHtml(lastJob.backendJobId || 'Local / sin datos')}</dd></div>
+                <div><dt>Windows JobId</dt><dd>\${escapeHtml(lastJob.windowsJobId ?? 'No disponible')}</dd></div>
+                <div><dt>Windows status</dt><dd>\${escapeHtml(windowsStatus)}</dd></div>
+                <div><dt>Duracion</dt><dd>\${escapeHtml(duration)}</dd></div>
+                <div><dt>Ultimo error</dt><dd class="\${lastJob.errorMessage ? 'error-text' : ''}">\${escapeHtml(lastJob.errorMessage || printer.queue?.blockReason || 'Sin errores')}</dd></div>
+              </dl>
+              <div class="printer-actions">
+                <button class="button button--secondary" data-action="raw-minimal" type="button">Prueba RAW minima</button>
+                <button class="button button--secondary" data-action="driver" type="button">Prueba driver</button>
+                \${canQuery ? '<button class="button button--secondary" data-action="refresh-job" data-job-id="' + escapeHtml(lastJob.localJobId) + '" type="button">Consultar estado</button>' : ''}
+                \${canCancel ? '<button class="button button--danger" data-action="cancel" data-job-id="' + escapeHtml(lastJob.localJobId) + '" type="button">Cancelar este trabajo</button>' : ''}
+                \${printer.agentStatus === 'BLOCKED' ? '<button class="button button--secondary" data-action="unblock" type="button">Desbloquear</button>' : ''}
+              </div>
+              <div class="profile-control">
+                <label class="field">
+                  <span>Transporte configurado</span>
+                  <select data-role="transport">
+                    <option value="WINDOWS_RAW" \${printer.transport === 'WINDOWS_RAW' ? 'selected' : ''}>WINDOWS_RAW</option>
+                    <option value="WINDOWS_DRIVER" \${printer.transport === 'WINDOWS_DRIVER' ? 'selected' : ''}>WINDOWS_DRIVER</option>
+                  </select>
+                </label>
+                <button class="button button--secondary" data-action="save-profile" type="button">Guardar transporte</button>
+              </div>
+            </article>
+          \`;
+        }).join('');
+      }
+
       async function refresh() {
         manualRefreshButton.disabled = true;
 
         try {
-          const [healthResponse, jobsResponse] = await Promise.all([
+          const [healthResponse, jobsResponse, printersResponse] = await Promise.all([
             fetch('/health', { cache: 'no-store' }),
             fetch('/jobs', { cache: 'no-store' }),
+            fetch('/printing/status', { cache: 'no-store' }),
           ]);
 
           if (!healthResponse.ok) {
@@ -1262,8 +1609,13 @@ function buildMonitorPage(): string {
             throw new Error('No fue posible leer el historial de impresion.');
           }
 
+          if (!printersResponse.ok) {
+            throw new Error('No fue posible leer el estado de las impresoras.');
+          }
+
           const health = await healthResponse.json();
           const jobsPayload = await jobsResponse.json();
+          const printersPayload = await printersResponse.json();
           const jobs = Array.isArray(jobsPayload.jobs) ? jobsPayload.jobs : [];
 
           renderBackendStatus(health);
@@ -1272,6 +1624,7 @@ function buildMonitorPage(): string {
           activeJobNode.textContent = health.queue?.activeJobLabel || 'Sin trabajo';
           uptimeNode.textContent = String(health.uptimeSeconds ?? 0) + ' s';
           renderJobs(jobs);
+          renderPrinters(printersPayload);
           lastRefreshNode.textContent = 'Ultima actualizacion: ' + formatDate(new Date().toISOString());
         } catch (error) {
           backendLinkNode.textContent = 'Sin datos';
@@ -1286,6 +1639,68 @@ function buildMonitorPage(): string {
           lastRefreshNode.textContent = 'No fue posible actualizar';
         } finally {
           manualRefreshButton.disabled = false;
+        }
+      }
+
+      async function postJson(path, body) {
+        const response = await fetch(path, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body || {}),
+        });
+        const payload = await response.json().catch(() => null);
+
+        if (!response.ok) {
+          throw new Error(payload && payload.message ? payload.message : 'La accion no pudo completarse.');
+        }
+
+        return payload;
+      }
+
+      async function handlePrinterAction(button) {
+        const row = button.closest('[data-printer]');
+        const printerName = row && row.dataset.printer;
+        const action = button.dataset.action;
+
+        if (!printerName || !action) {
+          return;
+        }
+
+        button.disabled = true;
+
+        try {
+          if (action === 'raw-minimal') {
+            await postJson('/printing/diagnostics/raw-minimal', { printerName });
+          } else if (action === 'driver') {
+            await postJson('/printing/diagnostics/driver', { printerName });
+          } else if (action === 'refresh-job') {
+            const localJobId = button.dataset.jobId;
+            if (localJobId) {
+              await postJson('/printing/jobs/' + encodeURIComponent(localJobId) + '/refresh');
+            }
+          } else if (action === 'cancel') {
+            const localJobId = button.dataset.jobId;
+            if (localJobId && window.confirm('Cancelar exclusivamente este Windows JobId?')) {
+              await postJson('/printing/jobs/' + encodeURIComponent(localJobId) + '/cancel');
+            }
+          } else if (action === 'unblock') {
+            if (window.confirm('Desbloquear esta impresora sin cancelar otros trabajos?')) {
+              await postJson('/printing/printers/unblock', { printerName });
+            }
+          } else if (action === 'save-profile') {
+            const transport = row.querySelector('[data-role="transport"]').value;
+            await postJson('/printing/printers/profile', {
+              systemName: printerName,
+              transport,
+              paperWidth: row.dataset.paperWidth === '58mm' ? '58mm' : '80mm',
+            });
+          }
+
+          await refresh();
+        } catch (error) {
+          window.alert(error instanceof Error ? error.message : 'La accion no pudo completarse.');
+        } finally {
+          button.disabled = false;
         }
       }
 
@@ -1338,6 +1753,13 @@ function buildMonitorPage(): string {
 
       manualRefreshButton.addEventListener('click', () => {
         void refresh();
+      });
+
+      printerContainerNode.addEventListener('click', (event) => {
+        const button = event.target.closest('button[data-action]');
+        if (button) {
+          void handlePrinterAction(button);
+        }
       });
 
       void refresh();

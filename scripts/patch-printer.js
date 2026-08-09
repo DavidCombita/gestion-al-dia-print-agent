@@ -36,20 +36,27 @@ function patchWindowsSource() {
   }
 
   const originalSource = fs.readFileSync(printerWinSourcePath, 'utf8');
+  let patchedSource = originalSource
+    .replace(
+      /(?:this->)*_value = \(Type\*\)malloc\(iSizeKbytes\);/,
+      'this->_value = (Type*)malloc(iSizeKbytes);',
+    )
+    .replace(/if\((?:this->)*_value != NULL\)/, 'if(this->_value != NULL)')
+    .replace(/::free\((?:this->)*_value\);/, '::free(this->_value);')
+    .replace(/(?:this->)*_value = NULL;/, 'this->_value = NULL;');
 
-  if (originalSource.includes('this->_value')) {
-    console.log('[patch-printer] El parche C++ ya estaba aplicado.');
-    return;
+  if (!patchedSource.includes('"statusNumber", V8_VALUE_NEW(Number, job->Status)')) {
+    patchedSource = patchedSource.replace(
+      'MY_NODE_SET_OBJECT_PROP(result_printer_job, "status", result_printer_job_status);',
+      [
+        'MY_NODE_SET_OBJECT_PROP(result_printer_job, "status", result_printer_job_status);',
+        '        MY_NODE_SET_OBJECT_PROP(result_printer_job, "statusNumber", V8_VALUE_NEW(Number, job->Status));',
+      ].join('\n'),
+    );
   }
 
-  const patchedSource = originalSource
-    .replace('_value = (Type*)malloc(iSizeKbytes);', 'this->_value = (Type*)malloc(iSizeKbytes);')
-    .replace('if(_value != NULL)', 'if(this->_value != NULL)')
-    .replace('::free(_value);', '::free(this->_value);')
-    .replace('_value = NULL;', 'this->_value = NULL;');
-
   if (patchedSource === originalSource) {
-    console.warn('[patch-printer] No encontre los patrones esperados en node_printer_win.cc.');
+    console.log('[patch-printer] Los parches C++ ya estaban aplicados.');
     return;
   }
 
@@ -75,26 +82,8 @@ function ensureLibRuntimeFiles() {
     [
       'const path = require("node:path");',
       '',
-      'const candidateBinaries = [',
-      '  path.join(__dirname, "node_printer.node"),',
-      '  path.join(__dirname, "..", "build", "Release", "node_printer.node"),',
-      '];',
-      '',
-      'let nativePrinter = null;',
-      'let lastError = null;',
-      '',
-      'for (const candidateBinary of candidateBinaries) {',
-      '  try {',
-      '    nativePrinter = require(candidateBinary);',
-      '    break;',
-      '  } catch (error) {',
-      '    lastError = error;',
-      '  }',
-      '}',
-      '',
-      'if (!nativePrinter) {',
-      '  throw lastError || new Error("No fue posible cargar node_printer.node");',
-      '}',
+      'const binaryPath = path.join(__dirname, "node_printer.node");',
+      'const nativePrinter = require(binaryPath);',
       '',
       'function printDirect(options) {',
       '  if (!options || typeof options !== "object") {',
@@ -141,6 +130,11 @@ function ensureLibRuntimeFiles() {
       'module.exports = {',
       '  ...nativePrinter,',
       '  printDirect,',
+      '  __gestionAlDiaModuleInfo: {',
+      '    modulePath: __filename,',
+      '    binaryPath,',
+      '    mode: "package-wrapper",',
+      '  },',
       '};',
     ].join('\n') + '\n',
     'utf8',
