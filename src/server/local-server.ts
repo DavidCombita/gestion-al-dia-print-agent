@@ -652,7 +652,7 @@ function buildTestPayload(paperWidth: '58mm' | '80mm'): ReceiptJobPayload {
     },
     order: {
       id: 'TEST-001',
-      createdAt: new Date().toLocaleString('es-CO'),
+      createdAt: new Date().toISOString(),
       tableName: 'Mesa 1',
       waiterName: 'Sistema',
     },
@@ -1586,8 +1586,28 @@ function buildMonitorPage(): string {
 
         const rows = jobs
           .map((job) => {
-            const errorHtml = job.errorMessage
-              ? '<div class="error-text">' + escapeHtml(job.errorMessage) + '</div>'
+            const diagnosticDetails = [];
+
+            if (job.errorCode) {
+              diagnosticDetails.push(
+                '<div class="error-text">Codigo: ' + escapeHtml(job.errorCode) + '</div>',
+              );
+            }
+            if (job.errorMessage) {
+              diagnosticDetails.push(
+                '<div class="error-text">' + escapeHtml(job.errorMessage) + '</div>',
+              );
+            }
+            if (Array.isArray(job.lastWindowsStatus) && job.lastWindowsStatus.length > 0) {
+              diagnosticDetails.push(
+                '<span class="job-meta">Windows: ' +
+                escapeHtml(job.lastWindowsStatus.join(', ')) +
+                '</span>',
+              );
+            }
+
+            const errorHtml = diagnosticDetails.length > 0
+              ? diagnosticDetails.join('')
               : '<span class="job-meta">Sin errores registrados</span>';
 
             return \`
