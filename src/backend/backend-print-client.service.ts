@@ -3,6 +3,7 @@ import { io, Socket } from 'socket.io-client';
 import { AppConfigService } from '../config/app-config.service';
 import { LoggerService } from '../logs/logger.service';
 import { PrintExecutionResult } from '../printing/contracts/print-result';
+import type { SpoolAcceptedNotification } from '../printing/contracts/print-request';
 import { PrintOrchestratorService } from '../printing/print-orchestrator.service';
 import { PrinterDiscoveryService } from '../printing/printers/printer-discovery.service';
 import {
@@ -20,6 +21,8 @@ type BackendPrintJobStatus =
 
 interface BackendPrintJob {
   id: string;
+  attemptId?: string | null;
+  leaseExpiresAt?: string | null;
   type: BackendPrintJobType;
   status: BackendPrintJobStatus;
   payload: BackendPrintPayload;
@@ -51,6 +54,7 @@ interface BackendRuntimeErrorSnapshot {
 type BackendPrintJobEventLevel = 'INFO' | 'WARN' | 'ERROR';
 
 interface BackendPrintJobEvent {
+  attemptId?: string;
   level?: BackendPrintJobEventLevel;
   stage: string;
   code?: string;
@@ -87,6 +91,8 @@ const HEARTBEAT_INTERVAL_MS = 25_000;
 const POLLING_INTERVAL_MS = 7_000;
 const BACKEND_REQUEST_TIMEOUT_MS = 20_000;
 const PRINTED_ACK_ATTEMPTS = 3;
+const SPOOL_ACCEPTED_ACK_ATTEMPTS = 3;
+const LEASE_RENEW_INTERVAL_MS = 30_000;
 
 export class BackendPrintClientService {
   private socket: Socket | null = null;
@@ -354,93 +360,262 @@ export class BackendPrintClientService {
   ): Promise<boolean> {
     const baseUrl = this.resolveBaseUrl();
     const printerName = job.printer.systemName || job.printer.name;
+    const stopLeaseRenewal = this.startLeaseRenewal(baseUrl, token, job);
+    const spoolAcceptanceReports = new Map<string, Promise<boolean>>();
+    const queueSpoolAcceptance = (notification: SpoolAcceptedNotification): void => {
+      const key = `${notification.copyNumber}:${notification.windowsJobId}`;
+
+      if (spoolAcceptanceReports.has(key)) {
+        return;
+      }
+
+      spoolAcceptanceReports.set(key, this.reportSpoolAccepted(baseUrl, token, job, notification));
+    };
 
     try {
       await this.request(
         baseUrl,
         `/print-jobs/${encodeURIComponent(job.id)}/printing`,
-        { method: 'POST' },
+        {
+          method: 'POST',
+          ...(job.attemptId ? { body: { attemptId: job.attemptId } } : {}),
+        },
         token,
       );
     } catch (error) {
       if (error instanceof BackendAgentAuthExpiredError) {
+        stopLeaseRenewal();
         throw error;
       }
 
       await this.reportPrintJobFailed(baseUrl, token, job, error, {
         stage: 'BACKEND_MARK_PRINTING_FAILED',
         code: 'BACKEND_MARK_PRINTING_FAILED',
+        retrySafety: 'SAFE_TO_RETRY',
       });
+      stopLeaseRenewal();
       return false;
     }
-
-    let result: PrintExecutionResult;
 
     try {
-      result = await this.dependencies.printOrchestrator.execute({
-        source: 'BACKEND',
-        backendJobId: job.id,
-        jobType: job.type,
-        payload: job.payload,
-        printerName,
-        displayPrinterName: job.printer.name,
-        copies: job.payload.options?.copies ?? job.printer.copies,
-        paperWidth: job.printer.paperWidth === 58 ? '58mm' : '80mm',
-      });
-    } catch (error) {
-      await this.reportPrintJobFailed(baseUrl, token, job, error, {
-        stage: 'PRINT_ORCHESTRATION_FAILED',
-      });
-      return false;
-    }
+      let result: PrintExecutionResult;
 
-    await this.recordExecutionResult(token, job, result);
+      try {
+        result = await this.dependencies.printOrchestrator.execute({
+          source: 'BACKEND',
+          backendJobId: job.id,
+          jobType: job.type,
+          payload: job.payload,
+          printerName,
+          displayPrinterName: job.printer.name,
+          copies: job.payload.options?.copies ?? job.printer.copies,
+          paperWidth: job.printer.paperWidth === 58 ? '58mm' : '80mm',
+          onSpoolAccepted: queueSpoolAcceptance,
+        });
+      } catch (error) {
+        await this.reportPrintJobFailed(baseUrl, token, job, error, {
+          stage: 'PRINT_ORCHESTRATION_FAILED',
+          retrySafety: 'SAFE_TO_RETRY',
+        });
+        return false;
+      }
 
-    if (result.status === 'SPOOL_COMPLETED') {
-      return this.markPrintedInBackendWithRetry(baseUrl, token, job, {
-        printerName,
-        transport: result.transport,
-        copies: result.copies,
-        localJobIds: result.attempts.map((attempt) => attempt.localJobId),
-        windowsJobIds: result.attempts
-          .map((attempt) => attempt.systemJobId)
-          .filter((jobId): jobId is number => typeof jobId === 'number'),
-      });
-    }
+      await Promise.allSettled(spoolAcceptanceReports.values());
+      await this.confirmAcceptedCopies(baseUrl, token, job, result);
+      await this.recordExecutionResult(token, job, result);
 
-    const anySubmitted = result.attempts.some((attempt) => attempt.submitted);
+      if (result.status === 'SPOOL_COMPLETED') {
+        return this.markPrintedInBackendWithRetry(baseUrl, token, job, {
+          printerName,
+          transport: result.transport,
+          copies: result.copies,
+          localJobIds: result.attempts.map((attempt) => attempt.localJobId),
+          windowsJobIds: result.attempts
+            .map((attempt) => attempt.systemJobId)
+            .filter((jobId): jobId is number => typeof jobId === 'number'),
+        });
+      }
 
-    if (!anySubmitted && result.retrySafety === 'SAFE_TO_RETRY') {
-      const firstFailure = result.attempts[0];
-      await this.reportPrintJobFailed(
-        baseUrl,
-        token,
-        job,
-        new Error(firstFailure?.errorMessage ?? 'La impresion fallo antes del submit.'),
-        {
-          stage: 'PRINT_FAILED_BEFORE_SUBMIT',
-          code: firstFailure?.errorCode,
-          metadata: { resultStatus: result.status },
-        },
-      );
-      return false;
-    }
+      const anySubmitted = result.attempts.some((attempt) => attempt.submitted);
 
-    await this.recordPrintJobEvent(token, job, {
-      level: 'WARN',
-      stage: 'PRINT_UNRESOLVED_UNSAFE_TO_RETRY',
-      code:
+      if (!anySubmitted && result.retrySafety === 'SAFE_TO_RETRY') {
+        const firstFailure = result.attempts[0];
+        await this.reportPrintJobFailed(
+          baseUrl,
+          token,
+          job,
+          new Error(firstFailure?.errorMessage ?? 'La impresion fallo antes del submit.'),
+          {
+            stage: 'PRINT_FAILED_BEFORE_SUBMIT',
+            code: firstFailure?.errorCode,
+            metadata: { resultStatus: result.status },
+            retrySafety: 'SAFE_TO_RETRY',
+          },
+        );
+        return false;
+      }
+
+      const terminalErrorCode =
+        result.status === 'PARTIAL_FAILURE' ? 'PARTIAL_FAILURE' : `PRINT_${result.status}`;
+      const terminalMessage =
         result.status === 'PARTIAL_FAILURE'
-          ? 'PARTIAL_FAILURE'
-          : `PRINT_${result.status}`,
-      message:
-        'Windows acepto al menos un trabajo sin confirmacion segura. No se reintentara automaticamente para evitar duplicados.',
-      metadata: {
-        resultStatus: result.status,
-        retrySafety: result.retrySafety,
-        printerName,
-        transport: result.transport,
-      },
+          ? 'Windows acepto solo parte de las copias. Se requiere revision y reintento manual.'
+          : 'Windows acepto al menos un trabajo sin confirmacion segura. Se requiere revision manual para evitar duplicados.';
+
+      await this.recordPrintJobEvent(token, job, {
+        level: 'WARN',
+        stage:
+          result.status === 'PARTIAL_FAILURE'
+            ? 'PRINT_PARTIAL_FAILURE_MANUAL_REVIEW'
+            : 'PRINT_UNRESOLVED_UNSAFE_TO_RETRY',
+        code: terminalErrorCode,
+        message: terminalMessage,
+        metadata: {
+          resultStatus: result.status,
+          retrySafety: result.retrySafety,
+          printerName,
+          transport: result.transport,
+          submittedCopies: result.attempts.filter((attempt) => attempt.submitted).length,
+          requestedCopies: result.copies,
+        },
+      });
+      await this.reportPrintJobFailed(baseUrl, token, job, new Error(terminalMessage), {
+        stage: 'PRINT_TERMINAL_MANUAL_REVIEW',
+        code: terminalErrorCode,
+        retrySafety: 'UNSAFE_TO_RETRY',
+        metadata: {
+          resultStatus: result.status,
+          submittedCopies: result.attempts.filter((attempt) => attempt.submitted).length,
+          requestedCopies: result.copies,
+        },
+      });
+      return false;
+    } finally {
+      stopLeaseRenewal();
+    }
+  }
+
+  private startLeaseRenewal(baseUrl: string, token: string, job: BackendPrintJob): () => void {
+    if (!job.attemptId) {
+      return () => undefined;
+    }
+
+    let stopped = false;
+    let renewalInFlight = false;
+    const timer = setInterval(() => {
+      if (stopped || renewalInFlight) {
+        return;
+      }
+
+      renewalInFlight = true;
+      void this.request<{ leaseExpiresAt: string }>(
+        baseUrl,
+        `/print-jobs/${encodeURIComponent(job.id)}/lease`,
+        {
+          method: 'POST',
+          body: { attemptId: job.attemptId },
+        },
+        token,
+      )
+        .catch((error) => {
+          this.dependencies.logger.warn(
+            'No fue posible renovar el lease del trabajo de impresion.',
+            {
+              backendJobId: job.id,
+              attemptId: job.attemptId,
+              error: this.errorMessage(error),
+            },
+          );
+        })
+        .finally(() => {
+          renewalInFlight = false;
+        });
+    }, LEASE_RENEW_INTERVAL_MS);
+    timer.unref?.();
+
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }
+
+  private async confirmAcceptedCopies(
+    baseUrl: string,
+    token: string,
+    job: BackendPrintJob,
+    result: PrintExecutionResult,
+  ): Promise<void> {
+    if (!job.attemptId) {
+      return;
+    }
+
+    await Promise.all(
+      result.attempts
+        .filter(
+          (attempt) =>
+            attempt.submitted && typeof attempt.systemJobId === 'number' && attempt.systemJobId > 0,
+        )
+        .map((attempt) =>
+          this.reportSpoolAccepted(baseUrl, token, job, {
+            localJobId: attempt.localJobId,
+            localAttemptId: attempt.attemptId,
+            copyNumber: attempt.copyNumber,
+            windowsJobId: attempt.systemJobId as number,
+            printerName: attempt.printerName,
+            documentName: attempt.documentName,
+            submittedAt: attempt.submittedAt ?? attempt.completedAt,
+            payloadBytes: attempt.payloadBytes,
+          }),
+        ),
+    );
+  }
+
+  private async reportSpoolAccepted(
+    baseUrl: string,
+    token: string,
+    job: BackendPrintJob,
+    notification: SpoolAcceptedNotification,
+  ): Promise<boolean> {
+    if (!job.attemptId) {
+      return true;
+    }
+
+    let lastError: unknown;
+
+    for (let attempt = 1; attempt <= SPOOL_ACCEPTED_ACK_ATTEMPTS; attempt += 1) {
+      try {
+        await this.request(
+          baseUrl,
+          `/print-jobs/${encodeURIComponent(job.id)}/spool-accepted`,
+          {
+            method: 'POST',
+            body: {
+              attemptId: job.attemptId,
+              copyIndex: notification.copyNumber - 1,
+              windowsJobId: notification.windowsJobId,
+              localJobId: notification.localJobId,
+            },
+          },
+          token,
+        );
+        this.recordSuccessfulContact();
+        return true;
+      } catch (error) {
+        if (error instanceof BackendAgentAuthExpiredError) {
+          throw error;
+        }
+        lastError = error;
+      }
+    }
+
+    this.recordBackendError(this.errorMessage(lastError));
+    this.dependencies.logger.warn('No fue posible confirmar SPOOL_ACCEPTED en el backend.', {
+      backendJobId: job.id,
+      attemptId: job.attemptId,
+      copyIndex: notification.copyNumber - 1,
+      windowsJobId: notification.windowsJobId,
+      ackAttempts: SPOOL_ACCEPTED_ACK_ATTEMPTS,
+      error: this.errorMessage(lastError),
     });
     return false;
   }
@@ -492,7 +667,10 @@ export class BackendPrintClientService {
         await this.request(
           baseUrl,
           `/print-jobs/${encodeURIComponent(job.id)}/printed`,
-          { method: 'POST' },
+          {
+            method: 'POST',
+            ...(job.attemptId ? { body: { attemptId: job.attemptId } } : {}),
+          },
           token,
         );
         await this.recordPrintJobEvent(token, job, {
@@ -534,6 +712,7 @@ export class BackendPrintClientService {
       stage: string;
       code?: string;
       metadata?: Record<string, unknown>;
+      retrySafety: 'SAFE_TO_RETRY' | 'UNSAFE_TO_RETRY';
     },
   ): Promise<void> {
     const errorMessage = this.errorMessage(error);
@@ -551,7 +730,16 @@ export class BackendPrintClientService {
       `/print-jobs/${encodeURIComponent(job.id)}/failed`,
       {
         method: 'POST',
-        body: { errorCode, errorMessage },
+        body: {
+          errorCode,
+          errorMessage,
+          ...(job.attemptId
+            ? {
+                attemptId: job.attemptId,
+                retrySafety: options.retrySafety,
+              }
+            : {}),
+        },
       },
       token,
     ).catch(() => undefined);
@@ -569,6 +757,7 @@ export class BackendPrintClientService {
         method: 'POST',
         body: {
           ...event,
+          ...(job.attemptId ? { attemptId: job.attemptId } : {}),
           metadata: {
             jobType: job.type,
             printerId: job.printer.id,

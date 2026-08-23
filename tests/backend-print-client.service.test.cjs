@@ -6,7 +6,9 @@ const { BackendPrintClientService } = require('../dist/backend/backend-print-cli
 const { sanitizeAppConfig } = require('../dist/config/config.schema.js');
 const { formatInvoice } = require('../dist/printing/formatters/invoice.formatter.js');
 const { formatKitchenOrder } = require('../dist/printing/formatters/kitchen-order.formatter.js');
-const { formatBackendPrintJob } = require('../dist/printing/strategies/print-format-strategy.registry.js');
+const {
+  formatBackendPrintJob,
+} = require('../dist/printing/strategies/print-format-strategy.registry.js');
 
 test('preserves a custom backend base URL in the local config schema', () => {
   const parsedConfig = sanitizeAppConfig({
@@ -36,7 +38,12 @@ test('clears the local token, stops background work, and notifies on backend 401
     };
 
     await assert.rejects(
-      service.request('https://example.com/', '/print-agents/heartbeat', { method: 'POST' }, 'device-token'),
+      service.request(
+        'https://example.com/',
+        '/print-agents/heartbeat',
+        { method: 'POST' },
+        'device-token',
+      ),
       (error) => {
         assert.equal(error.name, 'BackendAgentAuthExpiredError');
         return true;
@@ -78,7 +85,12 @@ test('clears the local token, stops background work, and notifies on backend 403
     };
 
     await assert.rejects(
-      service.request('https://example.com/', '/print-jobs/next-pending', { method: 'GET' }, 'device-token'),
+      service.request(
+        'https://example.com/',
+        '/print-jobs/next-pending',
+        { method: 'GET' },
+        'device-token',
+      ),
       (error) => {
         assert.equal(error.name, 'BackendAgentAuthExpiredError');
         return true;
@@ -109,20 +121,20 @@ test('reports an invalid pairing code without expiring an existing agent session
   global.fetch = async () => ({
     ok: false,
     status: 401,
-    text: async () =>
-      JSON.stringify({ message: 'Codigo de vinculacion invalido o vencido.' }),
+    text: async () => JSON.stringify({ message: 'Codigo de vinculacion invalido o vencido.' }),
   });
 
   try {
-    const service = createService({ savedConfigs, notifications, warnings: [] });
+    const service = createService({
+      savedConfigs,
+      notifications,
+      warnings: [],
+    });
     service.stop = () => {
       stopCalls += 1;
     };
 
-    await assert.rejects(
-      service.register('123456'),
-      /Codigo de vinculacion invalido o vencido\./,
-    );
+    await assert.rejects(service.register('123456'), /Codigo de vinculacion invalido o vencido\./);
 
     assert.equal(stopCalls, 0);
     assert.deepEqual(savedConfigs, []);
@@ -142,7 +154,11 @@ test('accepts successful empty backend responses without JSON parse failures', a
   });
 
   try {
-    const service = createService({ savedConfigs: [], notifications: [], warnings: [] });
+    const service = createService({
+      savedConfigs: [],
+      notifications: [],
+      warnings: [],
+    });
     const result = await service.request(
       'https://example.com/',
       '/print-jobs/next-pending',
@@ -166,7 +182,11 @@ test('reports non-json backend responses with a controlled message', async () =>
   });
 
   try {
-    const service = createService({ savedConfigs: [], notifications: [], warnings: [] });
+    const service = createService({
+      savedConfigs: [],
+      notifications: [],
+      warnings: [],
+    });
 
     await assert.rejects(
       service.request(
@@ -198,7 +218,11 @@ test('restarts background connectivity after a successful re-pairing', async () 
   });
 
   try {
-    const service = createService({ savedConfigs, notifications: [], warnings: [] });
+    const service = createService({
+      savedConfigs,
+      notifications: [],
+      warnings: [],
+    });
     service.start = () => {
       startCalls += 1;
     };
@@ -224,7 +248,11 @@ test('restarts background connectivity after a successful re-pairing', async () 
 });
 
 test('reconnects on startup when a persisted device token still exists after restart', async () => {
-  const service = createService({ savedConfigs: [], notifications: [], warnings: [] });
+  const service = createService({
+    savedConfigs: [],
+    notifications: [],
+    warnings: [],
+  });
   let stopCalls = 0;
   let connectSocketCalls = 0;
   let heartbeatCalls = 0;
@@ -342,7 +370,11 @@ test('formats invoices with tip and payment breakdown', () => {
 });
 
 test('routes thermal inventory and shift reports without requiring receipt fields', () => {
-  const service = createService({ savedConfigs: [], notifications: [], warnings: [] });
+  const service = createService({
+    savedConfigs: [],
+    notifications: [],
+    warnings: [],
+  });
   const payload = {
     version: 1,
     reportKind: 'SHIFT',
@@ -411,10 +443,7 @@ test('rejects payloads that do not match the selected print strategy', () => {
     () => formatBackendPrintJob('SHIFT_REPORT', thermalPayload),
     /SHIFT_REPORT.*shift/i,
   );
-  assert.throws(
-    () => formatBackendPrintJob('RECEIPT', thermalPayload),
-    /RECEIPT.*factura/i,
-  );
+  assert.throws(() => formatBackendPrintJob('RECEIPT', thermalPayload), /RECEIPT.*factura/i);
 });
 
 test('does not report failed after Windows accepts a raw job but backend printed ack fails', async () => {
@@ -512,6 +541,280 @@ test('does not report failed after Windows accepts a raw job but backend printed
   }
 });
 
+test('reports SPOOL_ACCEPTED per copy and includes attemptId in terminal acknowledgements', async () => {
+  const restoreFetch = global.fetch;
+  const requests = [];
+
+  global.fetch = async (url, options = {}) => {
+    const requestUrl = new URL(url);
+    requests.push({
+      path: requestUrl.pathname,
+      method: options.method,
+      body: options.body ? JSON.parse(options.body) : null,
+    });
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ accepted: true }),
+    };
+  };
+
+  try {
+    const service = createService({
+      savedConfigs: [],
+      notifications: [],
+      warnings: [],
+      configOverrides: { backendBaseUrl: 'http://127.0.0.1:4321' },
+    });
+    service.dependencies.printOrchestrator.execute = async (request) => {
+      request.onSpoolAccepted?.({
+        localJobId: 'history-1',
+        localAttemptId: 'local-attempt-1',
+        copyNumber: 1,
+        windowsJobId: 321,
+        printerName: request.printerName,
+        documentName: 'ticket-1',
+        submittedAt: '2026-08-18T10:00:00.000Z',
+        payloadBytes: 120,
+      });
+      return {
+        status: 'SPOOL_COMPLETED',
+        retrySafety: 'UNSAFE_TO_RETRY',
+        printerName: request.printerName,
+        transport: 'WINDOWS_RAW',
+        copies: 1,
+        attempts: [
+          {
+            localJobId: 'history-1',
+            attemptId: 'local-attempt-1',
+            copyNumber: 1,
+            status: 'SPOOL_COMPLETED',
+            retrySafety: 'UNSAFE_TO_RETRY',
+            submitted: true,
+            printerName: request.printerName,
+            documentName: 'ticket-1',
+            transport: 'WINDOWS_RAW',
+            systemJobId: 321,
+            submittedAt: '2026-08-18T10:00:00.000Z',
+            completedAt: '2026-08-18T10:00:01.000Z',
+            elapsedMs: 1000,
+          },
+        ],
+      };
+    };
+
+    const completed = await service.printClaimedJob(
+      buildBackendJob({ attemptId: 'backend-attempt-1' }),
+      'device-token',
+    );
+
+    const spoolRequests = requests.filter((request) => request.path.endsWith('/spool-accepted'));
+    const printingRequest = requests.find((request) => request.path.endsWith('/printing'));
+    const printedRequest = requests.find((request) => request.path.endsWith('/printed'));
+
+    assert.equal(completed, true);
+    assert.equal(spoolRequests.length >= 1, true);
+    assert.deepEqual(spoolRequests[0].body, {
+      attemptId: 'backend-attempt-1',
+      copyIndex: 0,
+      windowsJobId: 321,
+      localJobId: 'history-1',
+    });
+    assert.deepEqual(printingRequest.body, { attemptId: 'backend-attempt-1' });
+    assert.deepEqual(printedRequest.body, { attemptId: 'backend-attempt-1' });
+    assert.equal(
+      requests
+        .filter((request) => request.path.endsWith('/events'))
+        .every((request) => request.body.attemptId === 'backend-attempt-1'),
+      true,
+    );
+    assert.equal(
+      requests.some((request) => request.path.endsWith('/failed')),
+      false,
+    );
+  } finally {
+    global.fetch = restoreFetch;
+  }
+});
+
+test('acknowledges partial copies as an unsafe terminal failure for manual review', async () => {
+  const restoreFetch = global.fetch;
+  const requests = [];
+
+  global.fetch = async (url, options = {}) => {
+    const requestUrl = new URL(url);
+    requests.push({
+      path: requestUrl.pathname,
+      body: options.body ? JSON.parse(options.body) : null,
+    });
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ accepted: true }),
+    };
+  };
+
+  try {
+    const service = createService({
+      savedConfigs: [],
+      notifications: [],
+      warnings: [],
+      configOverrides: { backendBaseUrl: 'http://127.0.0.1:4321' },
+    });
+    service.dependencies.printOrchestrator.execute = async (request) => {
+      request.onSpoolAccepted?.({
+        localJobId: 'history-1',
+        localAttemptId: 'local-attempt-1',
+        copyNumber: 1,
+        windowsJobId: 444,
+        printerName: request.printerName,
+        documentName: 'ticket-1',
+        submittedAt: '2026-08-18T10:00:00.000Z',
+      });
+      return {
+        status: 'PARTIAL_FAILURE',
+        retrySafety: 'UNSAFE_TO_RETRY',
+        printerName: request.printerName,
+        transport: 'WINDOWS_RAW',
+        copies: 2,
+        attempts: [
+          {
+            localJobId: 'history-1',
+            attemptId: 'local-attempt-1',
+            copyNumber: 1,
+            status: 'SPOOL_COMPLETED',
+            retrySafety: 'UNSAFE_TO_RETRY',
+            submitted: true,
+            printerName: request.printerName,
+            documentName: 'ticket-1',
+            transport: 'WINDOWS_RAW',
+            systemJobId: 444,
+            completedAt: '2026-08-18T10:00:01.000Z',
+            elapsedMs: 1000,
+          },
+          {
+            localJobId: 'history-2',
+            attemptId: 'local-attempt-2',
+            copyNumber: 2,
+            status: 'FAILED',
+            retrySafety: 'SAFE_TO_RETRY',
+            submitted: false,
+            printerName: request.printerName,
+            documentName: 'ticket-2',
+            transport: 'WINDOWS_RAW',
+            completedAt: '2026-08-18T10:00:01.000Z',
+            errorCode: 'RAW_SUBMIT_FAILED',
+            errorMessage: 'Segunda copia rechazada.',
+            elapsedMs: 1000,
+          },
+        ],
+      };
+    };
+
+    const completed = await service.printClaimedJob(
+      buildBackendJob({
+        attemptId: 'backend-attempt-1',
+        payload: {
+          ...buildBackendJob().payload,
+          options: {
+            ...buildBackendJob().payload.options,
+            copies: 2,
+          },
+        },
+      }),
+      'device-token',
+    );
+
+    const failedRequests = requests.filter((request) => request.path.endsWith('/failed'));
+
+    assert.equal(completed, false);
+    assert.equal(failedRequests.length, 1);
+    assert.deepEqual(failedRequests[0].body, {
+      errorCode: 'PARTIAL_FAILURE',
+      errorMessage:
+        'Windows acepto solo parte de las copias. Se requiere revision y reintento manual.',
+      attemptId: 'backend-attempt-1',
+      retrySafety: 'UNSAFE_TO_RETRY',
+    });
+    assert.equal(
+      requests.some((request) => request.path.endsWith('/printed')),
+      false,
+    );
+    assert.equal(
+      requests
+        .filter((request) => request.path.endsWith('/events'))
+        .some((request) => request.body.stage === 'PRINT_PARTIAL_FAILURE_MANUAL_REVIEW'),
+      true,
+    );
+  } finally {
+    global.fetch = restoreFetch;
+  }
+});
+
+test('renews the backend lease while a v2 attempt is active', async () => {
+  const restoreFetch = global.fetch;
+  const restoreSetInterval = global.setInterval;
+  const restoreClearInterval = global.clearInterval;
+  const requests = [];
+  let intervalCallback;
+  let intervalMs;
+  let cleared = false;
+  const fakeTimer = { unref() {} };
+
+  global.fetch = async (url, options = {}) => {
+    requests.push({
+      path: new URL(url).pathname,
+      body: options.body ? JSON.parse(options.body) : null,
+    });
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ leaseExpiresAt: '2026-08-18T10:02:00.000Z' }),
+    };
+  };
+  global.setInterval = (callback, milliseconds) => {
+    intervalCallback = callback;
+    intervalMs = milliseconds;
+    return fakeTimer;
+  };
+  global.clearInterval = (timer) => {
+    if (timer === fakeTimer) {
+      cleared = true;
+    }
+  };
+
+  try {
+    const service = createService({
+      savedConfigs: [],
+      notifications: [],
+      warnings: [],
+      configOverrides: { backendBaseUrl: 'http://127.0.0.1:4321' },
+    });
+    const stop = service.startLeaseRenewal(
+      'http://127.0.0.1:4321',
+      'device-token',
+      buildBackendJob({ attemptId: 'backend-attempt-1' }),
+    );
+
+    intervalCallback();
+    await new Promise((resolve) => setImmediate(resolve));
+    stop();
+
+    assert.equal(intervalMs, 30_000);
+    assert.deepEqual(requests, [
+      {
+        path: '/print-jobs/job-1/lease',
+        body: { attemptId: 'backend-attempt-1' },
+      },
+    ]);
+    assert.equal(cleared, true);
+  } finally {
+    global.fetch = restoreFetch;
+    global.setInterval = restoreSetInterval;
+    global.clearInterval = restoreClearInterval;
+  }
+});
+
 test('uses the configured backend base URL for registration, revocation handling, and socket reconnection', async () => {
   const notifications = [];
   const savedConfigs = [];
@@ -550,7 +853,10 @@ test('uses the configured backend base URL for registration, revocation handling
         content: 'Sesion expirada. Realiza el pairing nuevamente.',
       },
     ]);
-    assert.equal(warnings.some((entry) => entry.statusCode === 403), true);
+    assert.equal(
+      warnings.some((entry) => entry.statusCode === 403),
+      true,
+    );
 
     backend.allowToken('token-2');
     backend.setRegistrationToken('token-2');
@@ -582,6 +888,57 @@ test('uses the configured backend base URL for registration, revocation handling
     await backend.close();
   }
 });
+
+function buildBackendJob(overrides = {}) {
+  const job = {
+    id: 'job-1',
+    type: 'KITCHEN_TICKET',
+    status: 'CLAIMED',
+    payload: {
+      business: {
+        name: 'Restaurante Demo',
+        nit: '900123456',
+      },
+      order: {
+        id: '42-7',
+        tableName: '01',
+        waiterName: 'Ana',
+        createdAt: '2026-08-08T10:00:00.000Z',
+      },
+      items: [
+        {
+          name: 'Hamburguesa clasica',
+          quantity: 1,
+          total: 15000,
+        },
+      ],
+      options: {
+        paperWidth: '80mm',
+        copies: 1,
+        cutPaper: true,
+        openCashDrawer: false,
+        showTotals: false,
+        showItemPrices: false,
+      },
+    },
+    printer: {
+      id: 'printer-1',
+      name: 'POS-80C',
+      systemName: 'POS-80C',
+      paperWidth: 80,
+      copies: 1,
+    },
+  };
+
+  return {
+    ...job,
+    ...overrides,
+    printer: {
+      ...job.printer,
+      ...(overrides.printer || {}),
+    },
+  };
+}
 
 function createService({ savedConfigs, notifications, warnings, configOverrides = {} }) {
   const config = {
@@ -696,9 +1053,10 @@ async function createBackendHarness() {
   const namespace = io.of('/print-agents');
 
   namespace.use((socket, next) => {
-    const token = typeof socket.handshake.auth?.token === 'string'
-      ? socket.handshake.auth.token
-      : extractBearerToken(socket.handshake.headers.authorization);
+    const token =
+      typeof socket.handshake.auth?.token === 'string'
+        ? socket.handshake.auth.token
+        : extractBearerToken(socket.handshake.headers.authorization);
 
     handshakeTokens.push(token || null);
 
@@ -771,7 +1129,9 @@ async function createBackendHarness() {
         return;
       }
 
-      await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+      await new Promise((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
     },
   };
 }

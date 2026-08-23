@@ -6,12 +6,18 @@ const test = require('node:test');
 
 const { PrintHistoryService } = require('../dist/printing/history/print-history.service.js');
 const { PrintOrchestratorService } = require('../dist/printing/print-orchestrator.service.js');
-const { PrintDiagnosticsService } = require('../dist/printing/diagnostics/print-diagnostics.service.js');
+const {
+  PrintDiagnosticsService,
+} = require('../dist/printing/diagnostics/print-diagnostics.service.js');
 const { formatInvoice } = require('../dist/printing/formatters/invoice.formatter.js');
 const { formatPrintJobHtml } = require('../dist/printing/formatters/html-ticket.formatter.js');
 const { PrinterQueueService } = require('../dist/printing/queue/printer-queue.service.js');
-const { PrintTransportRegistry } = require('../dist/printing/transports/print-transport.registry.js');
-const { WindowsDriverTransport } = require('../dist/printing/transports/windows-driver.transport.js');
+const {
+  PrintTransportRegistry,
+} = require('../dist/printing/transports/print-transport.registry.js');
+const {
+  WindowsDriverTransport,
+} = require('../dist/printing/transports/windows-driver.transport.js');
 const { WindowsRawTransport } = require('../dist/printing/transports/windows-raw.transport.js');
 const { SpoolJobMonitorService } = require('../dist/printing/windows/spool-job-monitor.service.js');
 const { WinSpoolOperationError } = require('../dist/printing/windows/winspool-adapter.js');
@@ -54,6 +60,51 @@ test('persists SUBMITTED and the Windows JobId as soon as submit returns', async
   assert.equal(submitted.systemJobId, 101);
   assert.equal(stored.status, 'SUBMITTED');
   assert.equal(stored.windowsJobId, 101);
+
+  releaseMonitor();
+  assert.equal((await execution).status, 'SPOOL_COMPLETED');
+});
+
+test('emits spool acceptance with the Windows JobId before monitoring completes', async (t) => {
+  let releaseMonitor;
+  let notifyMonitorStarted;
+  const monitorStarted = new Promise((resolve) => {
+    notifyMonitorStarted = resolve;
+  });
+  const monitorRelease = new Promise((resolve) => {
+    releaseMonitor = resolve;
+  });
+  const notifications = [];
+  const harness = createHarness(t, {
+    monitor: {
+      async monitor(job) {
+        notifyMonitorStarted(job);
+        await monitorRelease;
+        return completedStatus();
+      },
+    },
+  });
+
+  const execution = harness.orchestrator.execute({
+    ...printRequest('POS-80C'),
+    backendJobId: 'backend-job-1',
+    onSpoolAccepted(notification) {
+      notifications.push(notification);
+    },
+  });
+  await monitorStarted;
+
+  assert.equal(notifications.length, 1);
+  assert.deepEqual(notifications[0], {
+    localJobId: harness.history.getRecentJobs()[0].localJobId,
+    localAttemptId: harness.history.getRecentJobs()[0].attemptId,
+    copyNumber: 1,
+    windowsJobId: 101,
+    printerName: 'POS-80C',
+    documentName: 'GAD-test-backend-job-1-1',
+    submittedAt: notifications[0].submittedAt,
+    payloadBytes: 4,
+  });
 
   releaseMonitor();
   assert.equal((await execution).status, 'SPOOL_COMPLETED');
@@ -110,7 +161,9 @@ test('treats an accepted job without Windows JobId as completed', async () => {
 });
 
 test('maps PAPEROUT to a terminal STUCK state', () => {
-  const result = mapWindowsJobStatus({ statusNumber: WINDOWS_JOB_STATUS.PAPEROUT });
+  const result = mapWindowsJobStatus({
+    statusNumber: WINDOWS_JOB_STATUS.PAPEROUT,
+  });
 
   assert.equal(result.state, 'STUCK');
   assert.equal(result.code, 'PRINTER_PAPEROUT');
@@ -123,19 +176,14 @@ test('maps COMPLETE to spool completion without claiming physical output', () =>
   });
 
   assert.equal(result.state, 'SPOOL_COMPLETED');
-  assert.equal(
-    result.code,
-    'WINDOWS_JOB_COMPLETE_NO_PHYSICAL_CONFIRMATION',
-  );
+  assert.equal(result.code, 'WINDOWS_JOB_COMPLETE_NO_PHYSICAL_CONFIRMATION');
   assert.match(result.message, /no confirma salida fisica/i);
 });
 
 test('treats ERROR plus PRINTING plus RETAINED as completed', () => {
   const result = mapWindowsJobStatus({
     statusNumber:
-      WINDOWS_JOB_STATUS.ERROR |
-      WINDOWS_JOB_STATUS.PRINTING |
-      WINDOWS_JOB_STATUS.RETAINED,
+      WINDOWS_JOB_STATUS.ERROR | WINDOWS_JOB_STATUS.PRINTING | WINDOWS_JOB_STATUS.RETAINED,
   });
 
   assert.equal(result.state, 'SPOOL_COMPLETED');
@@ -145,18 +193,24 @@ test('treats ERROR plus PRINTING plus RETAINED as completed', () => {
 
 test('maps numeric Windows printer availability independently from job status', () => {
   assert.equal(
-    mapWindowsPrinterAvailability({ statusNumber: WINDOWS_PRINTER_STATUS.OFFLINE }),
+    mapWindowsPrinterAvailability({
+      statusNumber: WINDOWS_PRINTER_STATUS.OFFLINE,
+    }),
     'OFFLINE',
   );
   assert.equal(
-    mapWindowsPrinterAvailability({ statusNumber: WINDOWS_PRINTER_STATUS.PAPER_OUT }),
+    mapWindowsPrinterAvailability({
+      statusNumber: WINDOWS_PRINTER_STATUS.PAPER_OUT,
+    }),
     'ERROR',
   );
   assert.equal(mapWindowsPrinterAvailability({ statusNumber: 0 }), 'READY');
 });
 
 test('does not retry automatically after Windows reports OFFLINE', async (t) => {
-  const offline = mapWindowsJobStatus({ statusNumber: WINDOWS_JOB_STATUS.OFFLINE });
+  const offline = mapWindowsJobStatus({
+    statusNumber: WINDOWS_JOB_STATUS.OFFLINE,
+  });
   const transport = new FakeTransport({ statuses: [offline] });
   const harness = createHarness(t, { transport });
   const result = await harness.orchestrator.execute(printRequest('POS-80C'));
@@ -167,7 +221,9 @@ test('does not retry automatically after Windows reports OFFLINE', async (t) => 
 });
 
 test('resolves a job that exceeds the polling deadline as STUCK', async () => {
-  const transport = new FakeTransport({ statusFactory: () => printingStatus() });
+  const transport = new FakeTransport({
+    statusFactory: () => printingStatus(),
+  });
   const monitor = createClockedMonitor({ completionTimeoutMs: 1_500 });
   const result = await monitor.monitor(submittedJob(), transport);
 
@@ -412,10 +468,10 @@ test('reports PARTIAL_FAILURE without resubmitting a completed copy', async (t) 
   });
 
   assert.equal(result.status, 'PARTIAL_FAILURE');
-  assert.deepEqual(result.attempts.map((attempt) => attempt.status), [
-    'SPOOL_COMPLETED',
-    'FAILED',
-  ]);
+  assert.deepEqual(
+    result.attempts.map((attempt) => attempt.status),
+    ['SPOOL_COMPLETED', 'FAILED'],
+  );
   assert.equal(transport.submitCalls.length, 2);
 });
 
@@ -531,11 +587,7 @@ test('builds a complete invoice with a different reference for every printer tes
   assert.notEqual(requests[0].payload.order.id, requests[1].payload.order.id);
 
   const rawInvoice = formatInvoice(requests[0].payload).toString('latin1');
-  const driverInvoice = formatPrintJobHtml(
-    'RECEIPT',
-    requests[0].payload,
-    'factura-prueba',
-  );
+  const driverInvoice = formatPrintJobHtml('RECEIPT', requests[0].payload, 'factura-prueba');
   assert.match(rawInvoice, /FACTURA DE PRUEBA/);
   assert.match(rawInvoice, /Cafe colombiano/);
   assert.match(rawInvoice, /TOTAL/);
@@ -619,10 +671,7 @@ test('refreshes a stuck JobId and resolves it when Windows no longer lists it', 
   const refreshed = await harness.orchestrator.refreshJobStatus(record.localJobId);
 
   assert.equal(refreshed.status, 'SPOOL_COMPLETED');
-  assert.equal(
-    refreshed.errorCode,
-    'WINDOWS_JOB_DISAPPEARED_AFTER_OBSERVATION',
-  );
+  assert.equal(refreshed.errorCode, 'WINDOWS_JOB_DISAPPEARED_AFTER_OBSERVATION');
   assert.equal(harness.queue.getPrinterSnapshot('POS-80C').health, 'HEALTHY');
 });
 

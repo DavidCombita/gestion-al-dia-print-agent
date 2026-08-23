@@ -63,15 +63,15 @@ export class PrintOrchestratorService {
     for (let copyNumber = 1; copyNumber <= copies; copyNumber += 1) {
       const documentName = buildDocumentName(request, copyNumber);
       const record = this.dependencies.historyService.createJob({
-          backendJobId: request.backendJobId,
-          printerName,
-          documentName,
-          jobType: request.jobType,
-          copyNumber,
-          copies,
-          transport: transportType,
-          retrySafety: 'SAFE_TO_RETRY',
-        });
+        backendJobId: request.backendJobId,
+        printerName,
+        documentName,
+        jobType: request.jobType,
+        copyNumber,
+        copies,
+        transport: transportType,
+        retrySafety: 'SAFE_TO_RETRY',
+      });
       records.push(record);
       this.logStage(record, 'PRINT_QUEUED', Date.now());
     }
@@ -490,6 +490,7 @@ export class PrintOrchestratorService {
         windowsJobId: acceptedJob.systemJobId,
         payloadBytes: acceptedJob.payloadBytes,
       });
+      this.notifySpoolAccepted(request, record, acceptedJob);
 
       const status = await this.dependencies.monitorService.monitor(
         acceptedJob,
@@ -690,6 +691,41 @@ export class PrintOrchestratorService {
       elapsedMs,
       retrySafety: status.retrySafety,
     });
+  }
+
+  private notifySpoolAccepted(
+    request: PrintExecutionRequest,
+    record: PrintJobRecord,
+    acceptedJob: SubmittedPrintJob,
+  ): void {
+    if (
+      !request.onSpoolAccepted ||
+      typeof acceptedJob.systemJobId !== 'number' ||
+      acceptedJob.systemJobId <= 0
+    ) {
+      return;
+    }
+
+    try {
+      request.onSpoolAccepted({
+        localJobId: record.localJobId,
+        localAttemptId: record.attemptId,
+        copyNumber: record.copyNumber,
+        windowsJobId: acceptedJob.systemJobId,
+        printerName: acceptedJob.printerName,
+        documentName: acceptedJob.documentName,
+        submittedAt: acceptedJob.submittedAt,
+        payloadBytes: acceptedJob.payloadBytes,
+      });
+    } catch (error) {
+      this.dependencies.logger.warn('No fue posible emitir la aceptacion inmediata del spooler.', {
+        backendJobId: record.backendJobId,
+        localJobId: record.localJobId,
+        copyNumber: record.copyNumber,
+        windowsJobId: acceptedJob.systemJobId,
+        error: describeError(error),
+      });
+    }
   }
 
   private transition(record: PrintJobRecord, status: PrintJobRecord['status']): void {

@@ -12,6 +12,17 @@ export interface PreparedPrintDocument {
   html?: string;
 }
 
+export interface SpoolAcceptedNotification {
+  localJobId: string;
+  localAttemptId: string;
+  copyNumber: number;
+  windowsJobId: number;
+  printerName: string;
+  documentName: string;
+  submittedAt: string;
+  payloadBytes?: number;
+}
+
 export interface PrintExecutionRequest {
   source: PrintRequestSource;
   jobType: BackendPrintJobType;
@@ -24,5 +35,5 @@ export interface PrintExecutionRequest {
   copies?: number;
   paperWidth?: PaperWidth;
   transportOverride?: PrintTransportType;
+  onSpoolAccepted?: (notification: SpoolAcceptedNotification) => void;
 }
-
